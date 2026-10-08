@@ -1,0 +1,39 @@
+name: "Feature Implementation Task"
+description: "Submit a development task aligned with the ICS 4101 Capstone proposal."
+title: "[FEAT]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: "### SalesMesh Engineering & Capstone Task Tracker"
+  - type: input
+    id: req_id
+    attributes:
+      label: "Traceability (Requirement or Objective ID)"
+      placeholder: "e.g., FR-01, NFR-02, Specific Objective iv"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: "Feature Description"
+      description: "State what capability is being added and why."
+    validations:
+      required: true
+  - type: textarea
+    id: tasks
+    attributes:
+      label: "Engineering Checklist"
+      value: |
+        - [ ] Implementation of core logic
+        - [ ] Unit test coverage
+        - [ ] Documentation updated
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: "Acceptance Criteria"
+      description: "Specific, measurable verification conditions."
+    validations:
+      required: true

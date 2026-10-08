@@ -1,0 +1,24 @@
+name: Frontend PWA CI
+
+on:
+  push:
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/ci-frontend.yml'
+  pull_request:
+    paths:
+      - 'frontend/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Check Environment
+        run: |
+          node -v
+          echo "Frontend PWA CI runner initialized successfully."
