@@ -1,0 +1,20 @@
+# Top-level runtime pins for the SalesMesh ML Risk Engine (Python 3.11).
+# Compile with:
+#   uv pip compile requirements.in --python-version 3.11 --universal -o requirements.txt
+#
+# scikit-learn and xgboost MUST equal the model artifact's `library_versions`
+# exactly (RiskCascadePipeline.load refuses a mismatch); numpy and joblib must
+# match major.minor. Retraining under new versions means updating these pins.
+numpy==1.26.4
+pandas==2.2.3
+scipy==1.14.1
+scikit-learn==1.6.1
+xgboost==2.1.3; sys_platform != "linux"
+# CPU-only build of the same `xgboost` module and __version__ (no ~200 MB nvidia-nccl-cu12 on Linux).
+xgboost-cpu==2.1.3; sys_platform == "linux"
+shap==0.46.0
+joblib==1.4.2
+fastapi==0.115.6
+pydantic==2.10.4
+pydantic-settings==2.7.1
+uvicorn==0.34.0
