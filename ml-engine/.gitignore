@@ -1,0 +1,6 @@
+# Regenerable with generate_dataset.py (~17 MB); the model artifact and its .sha256 ARE committed.
+salesmesh_fraud_dataset.csv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
