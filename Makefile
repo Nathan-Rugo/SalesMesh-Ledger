@@ -27,7 +27,7 @@ ps:
 
 test:
 	@echo "Running ML Engine pytest suite..."
-	cd ml-engine && pytest || true
+	cd ml-engine && pytest
 	@echo "Running Gateway tests..."
 	cd backend/gateway && npm test || true
 

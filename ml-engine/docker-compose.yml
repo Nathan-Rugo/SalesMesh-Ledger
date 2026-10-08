@@ -1,0 +1,24 @@
+services:
+  ml-risk-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: salesmesh-ml-risk-engine
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - ENVIRONMENT=production
+      - MODEL_PATH=/app/models/risk_cascade_v1.0.0.joblib
+      # Pin the artifact digest from outside models/ (see models/*.sha256); empty = sidecar check only.
+      - MODEL_SHA256=${MODEL_SHA256:-}
+      - ENABLE_SHAP=true
+      - DEFAULT_TOP_K_SHAP=3
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '8000') + '/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
