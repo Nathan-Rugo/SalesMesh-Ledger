@@ -1,0 +1,19 @@
+[project]
+name = "salesmesh-ml-engine"
+version = "1.0.0"
+description = "SalesMesh Module 2: two-layer risk cascade (Isolation Forest + calibrated XGBoost) served by FastAPI."
+readme = "README.md"
+requires-python = "~=3.11"
+authors = [{ name = "Githinji Nathan Rugo" }]
+# Runtime and dev dependencies are pinned in requirements.in / requirements-dev.in and
+# compiled (uv pip compile --python-version 3.11 --universal) into requirements*.txt.
+# The pins must equal the model artifact's library_versions, so they are not repeated here.
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = [
+    # shap 0.46.0 triggers this numpy deprecation ~900 times at import (shap/plots/colors/_colorconv.py).
+    'ignore:Converting `np.inexact` or `np.floating` to a dtype is deprecated:DeprecationWarning:shap\..*',
+]
