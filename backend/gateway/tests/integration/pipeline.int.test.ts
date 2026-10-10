@@ -214,15 +214,17 @@ describeDb('settlement pipeline (real Postgres)', () => {
          JOIN verification_events v USING (transaction_id)
         GROUP BY 1, 2, 3 ORDER BY 1`
     );
-    expect(rows[0]).toMatchObject({ mpesa_receipt_id: 'HEAL000001', escrow_status: 'HELD', hold_period_hours: 24, kinds: ['INITIAL', 'RESCORE'] });
+    // Spec gh-23: promoted for the risk-adaptive T_hold computed at re-score (new agent R 0.5, layer-1 proxy p).
+    expect(rows[0]).toMatchObject({ mpesa_receipt_id: 'HEAL000001', escrow_status: 'HELD', hold_period_hours: 5, kinds: ['INITIAL', 'RESCORE'] });
     expect(rows[1]).toMatchObject({ mpesa_receipt_id: 'HEAL000002', escrow_status: 'QUARANTINED', kinds: ['INITIAL'] });
     expect(ml.calls.filter((c) => c.transaction_id === 'HEAL000001')).toHaveLength(1);
     expect(ml.calls.filter((c) => c.transaction_id === 'HEAL000002')).toHaveLength(0);
     const { rows: [due] } = await db.pool.query(
-      `SELECT release_due_at > NOW() + interval '23 hours' AS fresh FROM escrow_accounts e
-         JOIN transactions t USING (transaction_id) WHERE t.mpesa_receipt_id = 'HEAL000001'`
+      `SELECT release_due_at > NOW() + make_interval(secs => e.hold_seconds - 60) AS fresh, e.hold_seconds, e.quarantine_reason
+         FROM escrow_accounts e JOIN transactions t USING (transaction_id) WHERE t.mpesa_receipt_id = 'HEAL000001'`
     );
-    expect(due.fresh).toBe(true);
+    expect(due).toMatchObject({ fresh: true, quarantine_reason: null });
+    expect(due.hold_seconds).toBeGreaterThan(4 * 3600);
   });
 
   it('a re-score that is still not CLEAR stays QUARANTINED and backs off', async () => {
@@ -234,8 +236,8 @@ describeDb('settlement pipeline (real Postgres)', () => {
     const r = new RescoreWorker({ pool: db.pool, riskClient: new ResilientRiskClient() });
     expect(await r.runOnce()).toBe(1);
     expect(await r.runOnce()).toBe(0); // latest event is now model-made: no longer eligible
-    const { rows: [e] } = await db.pool.query(`SELECT escrow_status, rescore_claim_token FROM escrow_accounts`);
-    expect(e).toMatchObject({ escrow_status: 'QUARANTINED', rescore_claim_token: null });
+    const { rows: [e] } = await db.pool.query(`SELECT escrow_status, rescore_claim_token, quarantine_reason FROM escrow_accounts`);
+    expect(e).toMatchObject({ escrow_status: 'QUARANTINED', rescore_claim_token: null, quarantine_reason: 'model_decision' });
     expect(await count(db.pool, `SELECT count(*) AS n FROM verification_events WHERE kind = 'RESCORE' AND decision = 'REVIEW'`)).toBe(1);
   });
 

@@ -8,8 +8,10 @@
  *   1. claims a lease (SKIP LOCKED, fresh rescore_claim_token) — no lock held across the ML call;
  *   2. rebuilds the same raw request (transaction + history as of the INITIAL evaluation);
  *   3. in ONE transaction, fenced on the token and re-checking eligibility: appends a RESCORE
- *      verification event and, for a model-made CLEAR, promotes QUARANTINED → HELD (24 h from
- *      now) with a status-guarded UPDATE. Anything else stays QUARANTINED; failures back off.
+ *      verification event and its trust row (agent locked last, current rating) and, for a
+ *      model-made CLEAR above the trust freeze, promotes QUARANTINED → HELD (T_hold from now) with
+ *      a status-guarded UPDATE. Anything else stays QUARANTINED; failures back off. A model-made
+ *      outcome (REVIEW, QUARANTINE, frozen CLEAR) is no longer eligible for self-heal.
  * RELEASED, security-held and model-made quarantines are never touched.
  */
 
@@ -23,10 +25,11 @@ import {
   lockRescoreLease,
   promoteToHeld,
   releaseRescoreLease,
+  setQuarantineReason,
   type RescoreClaim,
 } from '../repositories/escrow.repository';
 import { fetchHistory } from '../repositories/transaction.repository';
-import { CLEAR_HOLD_HOURS, EscrowService, escrowService, isModelClear } from '../services/escrow.service';
+import { EscrowService, escrowOutcome, escrowService } from '../services/escrow.service';
 import { resilientRiskClient, type ResilientRiskClient } from '../services/risk_client.service';
 
 export type RescoreOutcome = 'promoted' | 'still_quarantined' | 'deferred' | 'lease_lost';
@@ -150,12 +153,15 @@ export class RescoreWorker {
     try {
       return await withTransaction(this.pool, async (client) => {
         if (!(await lockRescoreLease(client, escrowId, token))) throw new Rollback('lease_lost');
-        await this.escrow.insertVerificationEvent(client, claim.transaction_id, risk, 'RESCORE', history.truncated || truncated);
-        if (isModelClear(risk)) {
-          if (!(await promoteToHeld(client, escrowId, token, CLEAR_HOLD_HOURS))) throw new Error('guarded promote matched no row');
-          console.info(`[RescoreWorker] escrow ${escrowId} (${ctx.receipt}) self-healed: QUARANTINED → HELD`);
+        const verificationId = await this.escrow.insertVerificationEvent(client, claim.transaction_id, risk, 'RESCORE', history.truncated || truncated);
+        const trust = verificationId ? await this.escrow.scoreTrust(client, claim.transaction_id, verificationId, risk) : null;
+        const outcome = escrowOutcome(risk, false, trust);
+        if (outcome.status === 'HELD') {
+          if (!(await promoteToHeld(client, escrowId, token, outcome.holdSeconds))) throw new Error('guarded promote matched no row');
+          console.info(`[RescoreWorker] escrow ${escrowId} (${ctx.receipt}) self-healed: QUARANTINED → HELD (${outcome.holdSeconds} s)`);
           return 'promoted' as const;
         }
+        if (outcome.reason && outcome.reason !== 'fail_safe') await setQuarantineReason(client, escrowId, outcome.reason);
         const n = claim.rescore_attempts ?? 1;
         const delay = Math.min(this.config.backoffBaseMs * 2 ** Math.max(0, n - 1), this.config.backoffMaxMs);
         await releaseRescoreLease(client, escrowId, token, delay);

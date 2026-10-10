@@ -25,6 +25,7 @@ import { SettlementWorker } from '../src/workers/settlement.worker';
 import { RescoreWorker } from '../src/workers/rescore.worker';
 import { ResilientRiskClient, type RiskEvaluationResponse } from '../src/services/risk_client.service';
 import type { IntakeRow } from '../src/repositories/intake.repository';
+import type { TrustAssessment } from '../src/domain/trust';
 
 const m = <T extends (...args: any[]) => any>(fn: T) => fn as unknown as jest.MockedFunction<T>;
 
@@ -41,7 +42,13 @@ const fakeEscrow = {
     created: true,
   })),
   insertVerificationEvent: jest.fn(async () => 'ver-1'),
+  scoreTrust: jest.fn(async (): Promise<TrustAssessment | null> => trusted()),
 };
+
+const trusted = (over: Partial<TrustAssessment> = {}): TrustAssessment => ({
+  pUsed: 0.02, pSource: 'xgb', agentRatingUsed: 0.98, amountFactor: 1, trustIndex: 0.98,
+  holdSeconds: 3702, holdReason: 'transaction', frozen: false, ...over,
+});
 
 const clear = (over: Partial<RiskEvaluationResponse> = {}): RiskEvaluationResponse => ({
   transaction_id: 'X',
@@ -57,6 +64,7 @@ const clear = (over: Partial<RiskEvaluationResponse> = {}): RiskEvaluationRespon
   evaluated_at: new Date().toISOString(),
   is_fail_safe: false,
   fail_safe_cause: null,
+  feature_vector: { velocity_v_i: 0.5, split_ratio_r_s: 0.1, entropy_gaps: 1.2, agent_zscore: 0.3, amount_to_median_ratio: 1, recipient_reuse_count: 0 },
   ...over,
 });
 
@@ -332,11 +340,12 @@ describe('re-score worker (self-healing quarantine)', () => {
     expect(escrowRepo.claimRescoreBatch).not.toHaveBeenCalled();
   });
 
-  it('model CLEAR → RESCORE event + guarded promote to HELD (24 h), in one transaction', async () => {
+  it('model CLEAR → RESCORE event + trust row + guarded promote to HELD (T_hold), in one transaction', async () => {
     jest.spyOn(console, 'info').mockImplementationOnce(() => undefined);
     expect(await rescorer().rescore(claim)).toBe('promoted');
     expect(fakeEscrow.insertVerificationEvent).toHaveBeenCalledWith(expect.anything(), 'tx-1', expect.objectContaining({ decision: 'CLEAR' }), 'RESCORE', false);
-    expect(escrowRepo.promoteToHeld).toHaveBeenCalledWith(expect.anything(), 'esc-1', 'rs-token', 24);
+    expect(fakeEscrow.scoreTrust).toHaveBeenCalledWith(expect.anything(), 'tx-1', 'ver-1', expect.objectContaining({ decision: 'CLEAR' }));
+    expect(escrowRepo.promoteToHeld).toHaveBeenCalledWith(expect.anything(), 'esc-1', 'rs-token', 3702);
     expect(txns.fetchHistory).toHaveBeenCalledWith(fakePool, expect.objectContaining({ asOfInitialOf: 'tx-1', excludeReceipt: 'OEI2AK4Q16' }));
     expect(clientQuery).toHaveBeenCalledWith('COMMIT');
   });
@@ -347,6 +356,13 @@ describe('re-score worker (self-healing quarantine)', () => {
     expect(escrowRepo.promoteToHeld).not.toHaveBeenCalled();
     expect(fakeEscrow.insertVerificationEvent).toHaveBeenCalledTimes(1);
     expect(m(escrowRepo.releaseRescoreLease).mock.calls[0][3]).toBeGreaterThan(0);
+  });
+
+  it('model CLEAR below the trust freeze → stays QUARANTINED (trust_below_threshold), not promoted', async () => {
+    fakeEscrow.scoreTrust.mockResolvedValueOnce(trusted({ trustIndex: 0.568, frozen: true }));
+    expect(await rescorer().rescore(claim)).toBe('still_quarantined');
+    expect(escrowRepo.promoteToHeld).not.toHaveBeenCalled();
+    expect(escrowRepo.setQuarantineReason).toHaveBeenCalledWith(expect.anything(), 'esc-1', 'trust_below_threshold');
   });
 
   it('breaker refuses mid-batch (circuit_open) → deferred, no audit event, attempt refunded', async () => {

@@ -31,6 +31,7 @@ import { assertPiiKey } from './config/pii';
 import { loadJwtKeyring } from './config/jwt';
 import { darajaConfig } from './daraja/client';
 import { overdueAfterMs, reconcileEnabled } from './config/reconcile';
+import { trustConfig } from './config/trust';
 import { corsOrigins, publicOrigin, requireAuth } from './auth/middleware';
 import type { Db } from './repositories/db.types';
 
@@ -46,6 +47,7 @@ import { spoolService } from './services/spool.service';
 import { queueStats } from './repositories/intake.repository';
 import { quarantineStats } from './repositories/escrow.repository';
 import { reconcileStats } from './repositories/reconcile.repository';
+import { ensureConfigSnapshot, trustStats } from './repositories/trust.repository';
 import { settlementWorker } from './workers/settlement.worker';
 import { rescoreWorker } from './workers/rescore.worker';
 import { reconcileWorker } from './workers/reconcile.worker';
@@ -163,11 +165,12 @@ app.get('/health/details', detailsAuth, async (_req: Request, res: Response) => 
     const isHealthy = redisOk && dbOk;
 
     // Queue observability; best effort (null when the DB cannot answer within ~1.5 s).
-    const [queue, quarantine, spoolDepth, recon] = await Promise.all([
+    const [queue, quarantine, spoolDepth, recon, trust] = await Promise.all([
       dbOk ? withTimeout(queueStats(pool)) : null,
       dbOk ? withTimeout(quarantineStats(pool, rescoreWorker.config.maxAttempts)) : null,
       spoolService.depth(),
       dbOk ? withTimeout(reconcileStats(pool, overdueAfterMs(reconcileWorker.config))) : null,
+      dbOk ? withTimeout(trustStats(pool)) : null,
     ]);
 
     res.status(isHealthy ? 200 : 503).json({
@@ -180,6 +183,7 @@ app.get('/health/details', detailsAuth, async (_req: Request, res: Response) => 
       awaitingSelfHeal: quarantine?.awaitingSelfHeal ?? null,
       stalledQuarantines: quarantine?.stalledQuarantines ?? null,
       spoolDepth,
+      trust, // spec gh-23: average S_t, computed-hold distribution (24 h), quarantines by reason
       workers: { settlement: settlementWorker.isRunning(), rescore: rescoreWorker.isRunning(), reconcile: reconcileWorker.isRunning() },
       reconciliation: {
         enabled: reconcileEnabled(),
@@ -255,7 +259,7 @@ process.on('uncaughtException', (err) => {
 });
 
 // ── Start Listener ────────────────────────────────────────────────────
-export const REQUIRED_MIGRATION = '003_reconciliation';
+export const REQUIRED_MIGRATION = '004_trust_scores';
 
 /**
  * Startup gates, without side effects: `fatal` problems refuse the start, `warnings` are logged.
@@ -274,6 +278,7 @@ export async function preflight(env: NodeJS.ProcessEnv, db: Db): Promise<{ fatal
   };
   gate(() => assertPiiKey(env)); // PII_HMAC_KEY >= 32 bytes: every stored hash depends on it
   gate(() => loadJwtKeyring(env)); // RS256 key ring, >= 2048-bit RSA: every access token depends on it
+  gate(() => trustConfig(env)); // risk-adaptive hold parameters (spec gh-23): every escrow hold depends on them
   // STK initiation and the STK Query reconciliation sweep both need the Daraja credentials.
   if (stkEnabled(env) || reconcileEnabled(env)) gate(() => darajaConfig(env));
   if (!env.MPESA_CALLBACK_TOKEN) fatal.push('MPESA_CALLBACK_TOKEN is not set (every Daraja callback would be rejected)');
@@ -310,6 +315,9 @@ async function startup(): Promise<void> {
     console.error('[Startup] refusing to start.');
     process.exit(1);
   }
+
+  // The trust parameters in force get their snapshot row (a no-op when unchanged).
+  await ensureConfigSnapshot(pool).catch((e) => console.error('[Startup] trust config snapshot failed:', (e as Error).message));
 
   // Connect Redis lazily on startup
   redisClient.connect().catch((err) => {

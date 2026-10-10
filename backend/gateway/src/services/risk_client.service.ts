@@ -52,6 +52,19 @@ export const RETRYABLE_FAIL_SAFE_CAUSES: readonly FailSafeCause[] = [
   'inference_error',
 ];
 
+/** ml-engine FeatureVectorOut: the 6 feature values the model scored. */
+export interface FeatureVector {
+  velocity_v_i: number;
+  split_ratio_r_s: number;
+  entropy_gaps: number;
+  agent_zscore: number;
+  amount_to_median_ratio: number;
+  recipient_reuse_count: number;
+}
+const FEATURE_NAMES: ReadonlyArray<keyof FeatureVector> = [
+  'velocity_v_i', 'split_ratio_r_s', 'entropy_gaps', 'agent_zscore', 'amount_to_median_ratio', 'recipient_reuse_count',
+];
+
 /** ml-engine EvaluateResponse fields the gateway relies on, plus the fail-safe marker. */
 export interface RiskEvaluationResponse {
   transaction_id: string;
@@ -67,6 +80,8 @@ export interface RiskEvaluationResponse {
   evaluated_at: string;
   is_fail_safe: boolean;
   fail_safe_cause: FailSafeCause | null;
+  /** Required on a model response (contract); null on fail-safe. */
+  feature_vector: FeatureVector | null;
 }
 
 const DECISIONS: ReadonlySet<string> = new Set(['CLEAR', 'QUARANTINE', 'REVIEW']);
@@ -84,6 +99,10 @@ function parseResponse(body: unknown, transactionId: string): RiskEvaluationResp
   if (typeof b.decision !== 'string' || !DECISIONS.has(b.decision)) return null;
   if (!isUnit(b.isolation_score) || !isUnit(b.xgb_probability)) return null;
   if (typeof b.model_version !== 'string' || b.model_version.length === 0) return null;
+  // The trust score needs the scored features: a response without them is a contract failure (fail-safe).
+  const fv = b.feature_vector as Record<string, unknown> | null | undefined;
+  if (typeof fv !== 'object' || fv === null || !FEATURE_NAMES.every((k) => typeof fv[k] === 'number' && Number.isFinite(fv[k]))) return null;
+  const featureVector = Object.fromEntries(FEATURE_NAMES.map((k) => [k, fv[k]])) as unknown as FeatureVector;
   return {
     transaction_id: transactionId,
     isolation_score: b.isolation_score,
@@ -98,6 +117,7 @@ function parseResponse(body: unknown, transactionId: string): RiskEvaluationResp
     evaluated_at: typeof b.evaluated_at === 'string' ? b.evaluated_at : new Date().toISOString(),
     is_fail_safe: false,
     fail_safe_cause: null,
+    feature_vector: featureVector,
   };
 }
 
@@ -238,6 +258,7 @@ export class ResilientRiskClient {
       evaluated_at: new Date().toISOString(),
       is_fail_safe: true,
       fail_safe_cause: cause,
+      feature_vector: null,
     };
   }
 
