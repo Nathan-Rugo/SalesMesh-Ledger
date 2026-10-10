@@ -16,6 +16,7 @@
  */
 
 import { STK_TTL_MS, stkClockSkewMs } from '../config/stk';
+import type { QueryResultRow } from 'pg';
 import { withTransaction, type Db, type TxDb } from './db.types';
 
 export { STK_TTL_MS };
@@ -79,7 +80,7 @@ const COLUMNS = `stk_request_id, agent_id, status, checkout_request_id, amount::
   response_code, result_code, error, customer_message,
   CASE WHEN status = 'PENDING' THEN EXTRACT(EPOCH FROM NOW() - COALESCE(claimed_at, created_at)) * 1000 END AS pending_age_ms`;
 
-function toRow(r: any): StkRow {
+function toRow(r: QueryResultRow): StkRow {
   return {
     stkRequestId: r.stk_request_id,
     agentId: r.agent_id,

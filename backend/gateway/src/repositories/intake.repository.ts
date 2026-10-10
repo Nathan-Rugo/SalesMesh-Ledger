@@ -301,19 +301,21 @@ export async function queueStats(db: Db): Promise<QueueStats> {
 
 export const REQUEUEABLE: readonly IntakeStatus[] = ['UNRESOLVED', 'FAILED', 'DEAD'];
 
+type RequeuedRow = { mpesa_receipt_id: string; status: string };
+
 /** Puts UNRESOLVED/FAILED/DEAD rows back to PENDING with fresh counters (requeue CLI). */
 export async function requeue(
   db: Db,
   filter: { statuses: IntakeStatus[]; receipts: string[]; dryRun: boolean }
-): Promise<Array<{ mpesa_receipt_id: string; status: string }>> {
+): Promise<RequeuedRow[]> {
   const statuses = filter.statuses.filter((s) => REQUEUEABLE.includes(s));
   const where = `status = ANY($1::text[]) AND (cardinality($2::text[]) = 0 OR mpesa_receipt_id = ANY($2::text[]))`;
   const params = [statuses.length ? statuses : [...REQUEUEABLE], filter.receipts];
   if (filter.dryRun) {
-    const { rows } = await db.query(`SELECT mpesa_receipt_id, status FROM mpesa_callbacks WHERE ${where} ORDER BY received_at`, params);
+    const { rows } = await db.query<RequeuedRow>(`SELECT mpesa_receipt_id, status FROM mpesa_callbacks WHERE ${where} ORDER BY received_at`, params);
     return rows;
   }
-  const { rows } = await db.query(
+  const { rows } = await db.query<RequeuedRow>(
     `UPDATE mpesa_callbacks
         SET status = 'PENDING', attempts = 0, resolve_attempts = 0, resolve_deadline = NULL,
             next_attempt_at = NOW(), claim_token = NULL, claimed_at = NULL, updated_at = NOW(),

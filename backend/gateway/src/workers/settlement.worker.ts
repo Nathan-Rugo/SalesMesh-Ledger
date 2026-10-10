@@ -21,6 +21,7 @@
 import type { PoolClient } from 'pg';
 import pool from '../config/db';
 import { assertPiiKey } from '../config/pii';
+import { field, ownErrorCode, type JsonRecord } from '../domain/unknown';
 import { settlementWorkerConfig, type SettlementWorkerConfig } from '../config/worker';
 import {
   CallbackParseError,
@@ -77,7 +78,7 @@ interface StkBinding {
 
 /** The STK request id a RECONCILED intake row was bound to by the statement import, or null. */
 export function reconciledStkRequestId(payload: unknown): string | null {
-  const id = (payload as any)?.Reconciliation?.stkRequestId;
+  const id = field(payload, 'Reconciliation', 'stkRequestId');
   return typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id) ? id : null;
 }
 
@@ -94,7 +95,7 @@ export interface SettlementWorkerDeps {
 }
 
 const isUniqueViolation = (e: unknown, constraint?: string): boolean =>
-  (e as any)?.code === '23505' && (!constraint || (e as any)?.constraint === constraint);
+  ownErrorCode(e) === '23505' && (!constraint || field(e, 'constraint') === constraint);
 
 export class SettlementWorker {
   private readonly pool: TxDb;
@@ -503,7 +504,7 @@ export class SettlementWorker {
           }
         }
       } catch (error) {
-        const code = String((error as any)?.code ?? '');
+        const code = ownErrorCode(error);
         if (code.startsWith('22') || code.startsWith('23')) {
           await park(raw, `receipt ${item.receipt}: SQLSTATE ${code}`);
           continue;
@@ -521,11 +522,12 @@ export class SettlementWorker {
 const SPOOL_CHANNELS: ReadonlySet<string> = new Set(['DARAJA_STK', 'C2B']);
 
 /** Why a spool entry cannot be inserted, or null when it is well-formed. */
-export function invalidSpoolItem(item: any): string | null {
-  if (!item || typeof item !== 'object') return 'not an object';
+export function invalidSpoolItem(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return 'not an object';
+  const item = value as JsonRecord;
   if (typeof item.receipt !== 'string' || !item.receipt) return 'missing receipt';
   if (typeof item.hash !== 'string' || !item.hash) return 'missing hash';
-  if (!SPOOL_CHANNELS.has(item.channel)) return 'unknown channel';
+  if (typeof item.channel !== 'string' || !SPOOL_CHANNELS.has(item.channel)) return 'unknown channel';
   if (!item.payload || typeof item.payload !== 'object') return 'payload is not an object';
   if (typeof item.receivedAt !== 'string' || !Number.isFinite(Date.parse(item.receivedAt))) return 'invalid receivedAt';
   return null;

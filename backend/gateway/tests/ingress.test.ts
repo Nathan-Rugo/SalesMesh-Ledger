@@ -15,7 +15,7 @@
  * so the suite runs entirely in-process with zero infrastructure.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 // =====================================================================
 // 1. MOCK SETUP — must run BEFORE any module imports
@@ -403,7 +403,7 @@ describe('Suite 3: Circuit Breaker — NFR-08 Fail-Safe', () => {
   // We do NOT go through the HTTP server because we need to control
   // timing and inspect internal state.
 
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+   
   const { ResilientRiskClient } = jest.requireActual('../src/services/risk_client.service') as any;
   // ^ We need the REAL class, not a mock.  However since fetch is already
   //   globally mocked, the class will use our mock fetch.

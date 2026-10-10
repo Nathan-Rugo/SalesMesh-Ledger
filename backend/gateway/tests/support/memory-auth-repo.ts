@@ -125,13 +125,19 @@ export async function findRefreshToken(_db: unknown, tokenHash: string, graceSec
 
 export async function revokeFamily(_db: unknown, familyId: string): Promise<number> {
   let n = 0;
-  for (const t of memAuth.tokens) if (t.familyId === familyId && t.revokedAt === null) (t.revokedAt = Date.now()), n++;
+  for (const t of memAuth.tokens) if (t.familyId === familyId && t.revokedAt === null) {
+      t.revokedAt = Date.now();
+      n++;
+    }
   return n;
 }
 
 export async function supersedeUnusedTokens(_db: unknown, familyId: string): Promise<number> {
   let n = 0;
-  for (const t of memAuth.tokens) if (t.familyId === familyId && t.rotatedAt === null && t.revokedAt === null) (t.revokedAt = Date.now()), n++;
+  for (const t of memAuth.tokens) if (t.familyId === familyId && t.rotatedAt === null && t.revokedAt === null) {
+      t.revokedAt = Date.now();
+      n++;
+    }
   return n;
 }
 
@@ -141,7 +147,10 @@ export async function purgeAuthData(): Promise<{ tokens: number; events: number 
 
 export async function revokeAllForUser(_db: unknown, userId: string): Promise<number> {
   let n = 0;
-  for (const t of memAuth.tokens) if (t.userId === userId && t.revokedAt === null) (t.revokedAt = Date.now()), n++;
+  for (const t of memAuth.tokens) if (t.userId === userId && t.revokedAt === null) {
+      t.revokedAt = Date.now();
+      n++;
+    }
   return n;
 }
 

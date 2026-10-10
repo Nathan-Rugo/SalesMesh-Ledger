@@ -9,6 +9,8 @@
  * unknown request fields and rejects NaN/Infinity, so the types below stay in lock-step.
  */
 
+import { field } from '../domain/unknown';
+
 /** The transaction being scored (ml-engine RawTransaction). */
 export interface RawTransaction {
   agent_id: string;
@@ -190,9 +192,9 @@ export class ResilientRiskClient {
         return this.failSafeDecision(request.transaction_id, errorCause(body, fallback));
       }
       if (!response.ok) {
-        const err = new Error(`ml-engine responded ${response.status}`);
-        (err as any).cause = errorCause(body, response.status === 503 ? 'service_unavailable' : 'inference_error');
-        throw err;
+        throw new Error(`ml-engine responded ${response.status}`, {
+          cause: errorCause(body, response.status === 503 ? 'service_unavailable' : 'inference_error'),
+        });
       }
 
       const decision = parseResponse(body, request.transaction_id);
@@ -206,7 +208,7 @@ export class ResilientRiskClient {
         this.recordLatency(Date.now() - started);
         return this.failSafeDecision(request.transaction_id, 'timeout');
       }
-      const cause = (error as any)?.cause;
+      const cause = field(error, 'cause');
       return this.failSafeDecision(
         request.transaction_id,
         cause === 'inference_error' || cause === 'service_unavailable' ? cause : 'service_unavailable'

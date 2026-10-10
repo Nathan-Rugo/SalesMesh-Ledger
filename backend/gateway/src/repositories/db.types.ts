@@ -2,7 +2,7 @@ import type { PoolClient, QueryResult, QueryResultRow } from 'pg';
 
 /** Anything that can run a query: a Pool or a checked-out client inside a transaction. */
 export interface Db {
-  query<R extends QueryResultRow = any>(text: string, values?: unknown[]): Promise<QueryResult<R>>;
+  query<R extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<QueryResult<R>>;
 }
 
 /** A pool that can also hand out a client for an explicit transaction. */

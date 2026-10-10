@@ -6,6 +6,7 @@
 
 import type { StoredCredential } from '../auth/credentials';
 import type { Role } from '../auth/tokens';
+import type { QueryResultRow } from 'pg';
 import type { Db } from './db.types';
 
 export interface UserAuthState {
@@ -24,7 +25,7 @@ const USER_SELECT = `
          c.algorithm, c.params, c.salt, c.hash, COALESCE(c.must_change, FALSE) AS must_change, c.one_time_expires_at
     FROM users u LEFT JOIN user_credentials c ON c.user_id = u.user_id`;
 
-function toState(r: any): UserAuthState {
+function toState(r: QueryResultRow): UserAuthState {
   return {
     userId: r.user_id,
     role: r.role,

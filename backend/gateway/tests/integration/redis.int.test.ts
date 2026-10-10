@@ -5,7 +5,7 @@
  *   TEST_REDIS_URL=redis://localhost:56379 npx jest tests/integration/redis
  */
 
-/* eslint-disable @typescript-eslint/no-var-requires */
+ 
 import crypto from 'crypto';
 
 // Requiring the modules under ts-jest and connecting can exceed 5 s while other suites load the CPU.

@@ -24,6 +24,7 @@
  */
 
 import crypto from 'crypto';
+import { isRecord } from '../domain/unknown';
 import Redis from 'ioredis';
 import { redisClient } from '../config/redis';
 import { alternateKeyedHashes, keyedHash, keyedHashMatches } from '../config/pii';
@@ -235,7 +236,7 @@ export async function redisReserve(redis: Redis, k: ReserveKeys, c: LoginThrottl
   const keys = [k.hard, k.hardPrev, k.phoneLock, k.phoneLockPrev, k.phoneFailures, k.daily, k.ip, k.device ?? 'auth:df:-'];
   let r: [number, string | number, number?, number?];
   try {
-    r = (await redis.eval(RESERVE_SCRIPT, keys.length, ...keys, ...reserveArgs(c, k.device !== null))) as any;
+    r = (await redis.eval(RESERVE_SCRIPT, keys.length, ...keys, ...reserveArgs(c, k.device !== null))) as typeof r;
   } catch (error) {
     throw new ThrottleUnavailableError(`throttle store unavailable: ${(error as Error).message}`);
   }
@@ -367,8 +368,8 @@ function deviceEntries(value: string | undefined): DeviceEntry[] {
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8'));
     const list = Array.isArray(parsed) ? parsed : [parsed];
     return list.filter(
-      (x: any): x is DeviceEntry =>
-        typeof x?.p === 'string' && typeof x?.d === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(x.d) && typeof x?.e === 'number'
+      (x: unknown): x is DeviceEntry =>
+        isRecord(x) && typeof x.p === 'string' && typeof x.d === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(x.d) && typeof x.e === 'number'
     );
   } catch {
     return [];

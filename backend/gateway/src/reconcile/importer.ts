@@ -42,6 +42,7 @@ import fs from 'fs';
 import path from 'path';
 import pool from '../config/db';
 import { keyedHash, KEYED_HASH_RE } from '../config/pii';
+import { field } from '../domain/unknown';
 import { reconcileImportConfig, type ReconcileImportConfig } from '../config/reconcile';
 import { STK_TTL_MS } from '../config/stk';
 import {
@@ -259,7 +260,7 @@ function c2bShaped(row: StatementRow, ctx: Ctx) {
 function knownAgentCode(k: KnownReceipt): string | null {
   if (k.txAgentCode) return k.txAgentCode;
   if (k.channel === 'C2B') {
-    const ref = String((k.payload as any)?.BillRefNumber ?? '').trim();
+    const ref = String(field(k.payload, 'BillRefNumber') ?? '').trim();
     return ref && !KEYED_HASH_RE.test(ref) ? normaliseAgentCode(ref) : null;
   }
   return k.stkAccountReference ? normaliseAgentCode(k.stkAccountReference) : null;

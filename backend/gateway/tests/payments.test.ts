@@ -5,7 +5,7 @@
  * limit, Daraja outcomes → 201/202/502. Daraja mocked via fetch; Redis via an in-memory store.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 jest.mock('../src/repositories/stk.repository', () => require('./support/memory-stk-repo'));
 const mockAgents = new Map<string, { agentId: string; agentCode: string | null; userDisabled: boolean }>();

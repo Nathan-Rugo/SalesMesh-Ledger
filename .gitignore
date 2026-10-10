@@ -61,9 +61,9 @@ redis_data/
 bmad-method/
 _bmad*/
 
-# Dev JWT key pairs (npm run keys:generate)
 backend/gateway/keys/
 keys/
 
-# Reconciliation statement evidence (customer data)
 reconcile-evidence/
+
+.claude/

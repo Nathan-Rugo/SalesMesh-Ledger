@@ -13,6 +13,7 @@
  */
 
 import express, { Router, type NextFunction, type Request, type Response } from 'express';
+import { errorMessage, field } from '../domain/unknown';
 import { REFRESH_TOKEN_TTL_S } from '../config/jwt';
 import { AuthService, type ClientInfo, type Session } from '../auth/auth.service';
 import { AUTH_COOKIE_PATH, cookieNames, originAllowed, readCookie, requireAuth } from '../auth/middleware';
@@ -177,12 +178,13 @@ export function createAuthRouter(service: AuthService = new AuthService()): Rout
   );
 
   // Body-parser errors (malformed / oversized JSON): a JSON 400, never the payload in logs.
-  router.use((err: any, _req: Request, res: Response, next: NextFunction) => {
-    if (typeof err?.type === 'string' && err.type.startsWith('entity.')) {
+  router.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const type = field(err, 'type');
+    if (typeof type === 'string' && type.startsWith('entity.')) {
       if (!res.headersSent) res.status(400).json({ error: 'invalid_request' });
       return;
     }
-    console.error('[Auth] request failed:', (err as Error)?.message);
+    console.error('[Auth] request failed:', errorMessage(err));
     if (!res.headersSent) res.status(503).json({ error: 'temporarily_unavailable' });
   });
 

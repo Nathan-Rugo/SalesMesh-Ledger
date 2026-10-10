@@ -19,6 +19,7 @@
  */
 
 import { parse } from 'csv-parse/sync';
+import { field } from '../domain/unknown';
 import { RECEIPT_RE, parseOtherParty, type OtherParty } from '../domain/callback';
 
 export class StatementError extends Error {
@@ -196,15 +197,21 @@ export function parseStatement(input: Buffer | string, opts: ParseOptions): Stat
   }
   let records: Array<{ record: string[]; info: { lines: number } }>;
   try {
-    records = parse(buf.toString('utf-8'), {
+    // csv-parse's typings don't model `info: true` (each row becomes { record, info }), so the
+    // shape is checked at runtime instead of trusting a cast.
+    const parsed: unknown = parse(buf.toString('utf-8'), {
       bom: true,
       relax_column_count: true,
       relax_quotes: false,
       skip_empty_lines: false,
       info: true,
-    }) as any;
+    });
+    if (!Array.isArray(parsed) || parsed.some((r) => !Array.isArray(field(r, 'record')) || typeof field(r, 'info', 'lines') !== 'number')) {
+      throw new Error('unexpected CSV parser output shape');
+    }
+    records = parsed;
   } catch (error) {
-    const line = (error as any)?.lines;
+    const line = field(error, 'lines');
     throw new StatementError([`${line ? `line ${line}: ` : ''}not valid CSV (${String((error as Error).message).split('\n')[0].slice(0, 160)})`]);
   }
 

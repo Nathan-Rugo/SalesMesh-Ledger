@@ -5,7 +5,7 @@
  * transient retries, terminal states, self-heal).
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 jest.mock('../src/repositories/agent.repository');
 jest.mock('../src/repositories/intake.repository');

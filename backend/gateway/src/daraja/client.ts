@@ -23,6 +23,7 @@
 
 import { darajaTotalTimeoutMs } from '../config/stk';
 import { formatDarajaTime } from '../domain/callback';
+import { errorCode as thrownErrorCode, isRecord, type JsonRecord } from '../domain/unknown';
 import { metrics as defaultMetrics, type GatewayMetrics } from '../services/metrics.service';
 
 export type TransactionType = 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
@@ -157,7 +158,7 @@ export const DARAJA_ERROR_OUTCOMES: Readonly<Record<string, 'REJECTED' | 'UNKNOW
 /** Connection errors where the request provably never left (safe to call REJECTED). */
 const NOT_SENT_CODES: ReadonlySet<string> = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH']);
 
-type FetchLike = (url: string, init?: any) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+type FetchLike = (url: string, init?: RequestInit) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
 
 const safe = (v: unknown, max = 200): string => String(v ?? '').replace(/\d{9,}/g, '[digits]').slice(0, max);
 
@@ -167,7 +168,7 @@ export class DarajaClient {
 
   constructor(
     private readonly configSource: DarajaConfig | (() => DarajaConfig) = () => darajaConfig(),
-    private readonly fetchImpl: FetchLike = (url, init) => (globalThis as any).fetch(url, init),
+    private readonly fetchImpl: FetchLike = (url, init) => fetch(url, init),
     private readonly metrics: GatewayMetrics = defaultMetrics
   ) {}
 
@@ -219,13 +220,14 @@ export class DarajaClient {
       });
       const text = await res.text();
       if (!res.ok) throw new Error(`OAuth HTTP ${res.status}`);
-      let body: any;
+      let parsed: unknown;
       try {
-        body = JSON.parse(text);
+        parsed = JSON.parse(text);
       } catch {
         throw new Error('OAuth response is not JSON');
       }
-      const value = typeof body?.access_token === 'string' ? body.access_token : '';
+      const body: JsonRecord = isRecord(parsed) ? parsed : {};
+      const value = typeof body.access_token === 'string' ? body.access_token : '';
       if (!value) throw new Error('OAuth response has no access_token');
       const expiresIn = Number(body.expires_in);
       const ttlMs = (Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 3599) * 1000;
@@ -309,7 +311,7 @@ export class DarajaClient {
         });
       } catch (error) {
         if (controller.signal.aborted) return { kind: 'UNKNOWN', code: 'timeout', message: 'no answer from Daraja in time' };
-        const code = String((error as any)?.cause?.code ?? (error as any)?.code ?? '');
+        const code = thrownErrorCode(error);
         if (NOT_SENT_CODES.has(code)) return { kind: 'REJECTED', code: `network_${code}`, message: 'Daraja unreachable' };
         return { kind: 'UNKNOWN', code: code ? `network_${code}` : 'network_error', message: 'connection to Daraja lost' };
       }
@@ -320,7 +322,7 @@ export class DarajaClient {
         // Headers arrived but the body did not: the request was processed or not — unknown.
         return { kind: 'UNKNOWN', code: controller.signal.aborted ? 'timeout' : 'body_lost', message: 'Daraja response lost' };
       }
-      let parsed: any = null;
+      let parsed: unknown = null;
       try {
         parsed = JSON.parse(text);
       } catch {
@@ -387,7 +389,7 @@ export class DarajaClient {
         });
       } catch (error) {
         if (controller.signal.aborted) return { kind: 'UNKNOWN', code: 'timeout', message: 'no answer from Daraja in time', unreachable: true };
-        const code = String((error as any)?.cause?.code ?? (error as any)?.code ?? '');
+        const code = thrownErrorCode(error);
         return { kind: 'UNKNOWN', code: code ? `network_${code}` : 'network_error', message: 'Daraja unreachable', unreachable: true };
       }
       let text: string;
@@ -396,7 +398,7 @@ export class DarajaClient {
       } catch {
         return { kind: 'UNKNOWN', code: controller.signal.aborted ? 'timeout' : 'body_lost', message: 'Daraja response lost', unreachable: true };
       }
-      let parsed: any = null;
+      let parsed: unknown = null;
       try {
         parsed = JSON.parse(text);
       } catch {
@@ -448,8 +450,9 @@ export const STK_QUERY_ERROR_OUTCOMES: Readonly<Record<string, 'PROCESSING' | 'T
 type QueryMapped = StkQueryOutcome | { kind: 'TOKEN_INVALID'; code: string };
 
 /** Maps one STK Push Query HTTP response to an outcome; `ours` is the CheckoutRequestID asked about. */
-export function mapStkQueryResponse(status: number, body: any, ours: string): QueryMapped {
-  const errorCode = typeof body?.errorCode === 'string' ? body.errorCode.trim() : '';
+export function mapStkQueryResponse(status: number, raw: unknown, ours: string): QueryMapped {
+  const body: JsonRecord = isRecord(raw) ? raw : {};
+  const errorCode = typeof body.errorCode === 'string' ? body.errorCode.trim() : '';
   if (errorCode) {
     const rule = STK_QUERY_ERROR_OUTCOMES[errorCode];
     const message = safe(body.errorMessage) || 'Daraja error';
@@ -462,7 +465,7 @@ export function mapStkQueryResponse(status: number, body: any, ours: string): Qu
   }
   if (status === 401) return { kind: 'TOKEN_INVALID', code: 'http_401' };
   if (status === 429) return { kind: 'PENDING', code: 'http_429', message: 'throttled', throttled: true };
-  if (status >= 200 && status < 300 && body && typeof body === 'object') {
+  if (status >= 200 && status < 300 && isRecord(raw)) {
     const responseCode = String(body.ResponseCode ?? '').trim();
     if (responseCode !== '0') return { kind: 'UNKNOWN', code: `response_${responseCode || 'missing'}`.slice(0, 40), message: 'query not accepted' };
     const echoed = typeof body.CheckoutRequestID === 'string' ? body.CheckoutRequestID.trim() : '';
@@ -496,8 +499,9 @@ function withinDeadline<T>(p: Promise<T>, deadline: number, message: string): Pr
 }
 
 /** Maps one Daraja STK Push HTTP response (status + parsed JSON or null) to an outcome. */
-export function mapStkResponse(status: number, body: any): Mapped {
-  const errorCode = typeof body?.errorCode === 'string' ? body.errorCode.trim() : '';
+export function mapStkResponse(status: number, raw: unknown): Mapped {
+  const body: JsonRecord = isRecord(raw) ? raw : {};
+  const errorCode = typeof body.errorCode === 'string' ? body.errorCode.trim() : '';
   if (errorCode) {
     const rule = DARAJA_ERROR_OUTCOMES[errorCode];
     if (rule === 'TOKEN') return { kind: 'TOKEN_INVALID', code: errorCode };
@@ -505,7 +509,7 @@ export function mapStkResponse(status: number, body: any): Mapped {
     return { kind, code: errorCode, message: safe(body.errorMessage) || 'Daraja error' };
   }
   if (status === 401) return { kind: 'TOKEN_INVALID', code: 'http_401' };
-  if (status >= 200 && status < 300 && body && body.ResponseCode !== undefined) {
+  if (status >= 200 && status < 300 && isRecord(raw) && body.ResponseCode !== undefined) {
     const responseCode = String(body.ResponseCode).trim();
     const checkoutRequestId = typeof body.CheckoutRequestID === 'string' ? body.CheckoutRequestID.trim() : '';
     if (responseCode === '0') {

@@ -9,6 +9,7 @@
  */
 
 import { alternateKeyedHashes, keyedHash, keyedHashMatches, KEYED_HASH_RE } from '../config/pii';
+import { field, isRecord, type JsonRecord } from './unknown';
 
 export type SourceChannel = 'DARAJA_STK' | 'C2B';
 
@@ -98,22 +99,24 @@ export interface StkFailure {
   resultDesc: string;
 }
 
-function stkItems(stk: any): Array<{ Name?: unknown; Value?: unknown }> {
-  const items = stk?.CallbackMetadata?.Item;
-  return Array.isArray(items) ? items : [];
+type StkItem = { Name?: unknown; Value?: unknown };
+
+function stkItems(stk: unknown): StkItem[] {
+  const items = field(stk, 'CallbackMetadata', 'Item');
+  return Array.isArray(items) ? items.filter(isRecord) : [];
 }
 
-const itemValue = (items: Array<{ Name?: unknown; Value?: unknown }>, name: string): unknown =>
-  items.find((i) => i && str(i.Name) === name)?.Value;
+const itemValue = (items: StkItem[], name: string): unknown => items.find((i) => str(i.Name) === name)?.Value;
 
 /** Extracts and validates receipt + amount from a raw Daraja body (STK callback or C2B confirmation). */
-export function extractIngress(body: any): Ingress {
+export function extractIngress(body: unknown): Ingress {
   let receipt: string;
   let rawAmount: unknown;
   let channel: SourceChannel;
 
-  if (body?.Body?.stkCallback) {
-    const stk = body.Body.stkCallback;
+  const stkRaw = field(body, 'Body', 'stkCallback');
+  if (stkRaw) {
+    const stk: JsonRecord = isRecord(stkRaw) ? stkRaw : {};
     if (str(stk.ResultCode) !== '0') {
       const resultCode = str(stk.ResultCode);
       const checkoutRequestId = str(stk.CheckoutRequestID);
@@ -130,7 +133,7 @@ export function extractIngress(body: any): Ingress {
     receipt = str(itemValue(items, 'MpesaReceiptNumber'));
     rawAmount = itemValue(items, 'Amount');
     channel = 'DARAJA_STK';
-  } else if (body && typeof body === 'object' && 'TransID' in body) {
+  } else if (isRecord(body) && 'TransID' in body) {
     receipt = str(body.TransID);
     rawAmount = body.TransAmount;
     channel = 'C2B';
@@ -203,16 +206,16 @@ export function isPhoneLike(value: unknown): boolean {
   return /^(?:254|0)?[17]\d{8}$/.test(digits);
 }
 
-function redactNode(node: any): any {
+function redactNode(node: unknown): unknown {
   if (Array.isArray(node)) {
-    return node.map((item) => {
-      if (item && typeof item === 'object' && !Array.isArray(item) && PHONE_KEY_RE.test(str(item.Name)) && 'Value' in item) {
-        return { ...redactNode({ ...item, Value: undefined }), Value: msisdnHash(item.Value) ?? MASKED_VALUE };
+    return node.map((item: unknown) => {
+      if (isRecord(item) && PHONE_KEY_RE.test(str(item.Name)) && 'Value' in item) {
+        return { ...(redactNode({ ...item, Value: undefined }) as JsonRecord), Value: msisdnHash(item.Value) ?? MASKED_VALUE };
       }
       return redactNode(item);
     });
   }
-  if (!node || typeof node !== 'object') return node;
+  if (!isRecord(node)) return node;
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(node)) {
     if (PHONE_KEY_RE.test(key) && (typeof value === 'string' || typeof value === 'number')) {
@@ -238,11 +241,12 @@ export const STK_PHONE_ALT_FIELD = 'PhoneNumberAltHashes';
  */
 export function redactPayload(body: unknown): unknown {
   const out = redactNode(body);
-  const stk = (body as any)?.Body?.stkCallback;
-  if (stk && typeof stk === 'object' && out?.Body?.stkCallback) {
+  const stk = field(body, 'Body', 'stkCallback');
+  const outStk = field(out, 'Body', 'stkCallback');
+  if (isRecord(stk) && isRecord(outStk)) {
     const input = msisdnHashInput(itemValue(stkItems(stk), 'PhoneNumber'));
     const alt = input === null ? [] : alternateKeyedHashes('counterparty', input);
-    if (alt.length > 0) out.Body.stkCallback[STK_PHONE_ALT_FIELD] = alt;
+    if (alt.length > 0) outStk[STK_PHONE_ALT_FIELD] = alt;
   }
   return out;
 }
@@ -267,20 +271,22 @@ export interface ParsedCallback {
 export function parseStoredCallback(payload: unknown): ParsedCallback {
   const ingress = extractIngress(payload);
   if (ingress.kind !== 'ok') throw new CallbackParseError(`unparseable payload: ${ingress.reason}`);
-  const body = payload as any;
+  const body: JsonRecord = isRecord(payload) ? payload : {};
   const keyed = (v: unknown): string | null => (KEYED_HASH_RE.test(str(v)) ? str(v) : null);
 
   if (ingress.channel === 'DARAJA_STK') {
-    const stk = body.Body.stkCallback;
+    const stkRaw = field(body, 'Body', 'stkCallback');
+    const stk: JsonRecord = isRecord(stkRaw) ? stkRaw : {};
     const items = stkItems(stk);
+    const altHashes = stk[STK_PHONE_ALT_FIELD];
     return {
       receipt: ingress.receipt,
       amountCents: ingress.amountCents,
       channel: ingress.channel,
       paymentTime: parseDarajaTime(itemValue(items, 'TransactionDate')),
       counterpartyHash: keyed(itemValue(items, 'PhoneNumber')),
-      counterpartyAltHashes: Array.isArray(stk[STK_PHONE_ALT_FIELD])
-        ? stk[STK_PHONE_ALT_FIELD].map(keyed).filter((h: string | null): h is string => h !== null)
+      counterpartyAltHashes: Array.isArray(altHashes)
+        ? altHashes.map(keyed).filter((h: string | null): h is string => h !== null)
         : [],
       checkoutRequestId: str(stk.CheckoutRequestID) || null,
       billRefNumber: null,
@@ -376,17 +382,17 @@ export function stableStringify(value: unknown): string {
 
 /** The CheckoutRequestID of an STK callback body (raw or redacted), or null. */
 export function checkoutRequestIdOf(body: unknown): string | null {
-  const id = str((body as any)?.Body?.stkCallback?.CheckoutRequestID);
+  const id = str(field(body, 'Body', 'stkCallback', 'CheckoutRequestID'));
   return id && id.length <= 100 ? id : null;
 }
 
 /** Identity fields of a raw (unredacted) callback, for comparing a late callback with a recovered row. */
 export function callbackIdentity(body: unknown): { checkoutRequestId: string | null; billRefNumber: string | null; phoneRaw: unknown } {
-  const b = body as any;
-  if (b?.Body?.stkCallback) {
-    return { checkoutRequestId: checkoutRequestIdOf(b), billRefNumber: null, phoneRaw: itemValue(stkItems(b.Body.stkCallback), 'PhoneNumber') };
+  const stk = field(body, 'Body', 'stkCallback');
+  if (stk) {
+    return { checkoutRequestId: checkoutRequestIdOf(body), billRefNumber: null, phoneRaw: itemValue(stkItems(stk), 'PhoneNumber') };
   }
-  return { checkoutRequestId: null, billRefNumber: str(b?.BillRefNumber) || null, phoneRaw: b?.MSISDN };
+  return { checkoutRequestId: null, billRefNumber: str(field(body, 'BillRefNumber')) || null, phoneRaw: field(body, 'MSISDN') };
 }
 
 /** The normalised MSISDN of a plain (unmasked, not provider-hashed) phone value, else null. */

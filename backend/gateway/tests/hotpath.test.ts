@@ -4,7 +4,7 @@
  * outage handling (503 + spool), mutation alarms, redaction, C2B validation, IP allowlist.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 const CALLBACK_TOKEN = 'hotpath-callback-token';
 process.env.MPESA_CALLBACK_TOKEN = CALLBACK_TOKEN;

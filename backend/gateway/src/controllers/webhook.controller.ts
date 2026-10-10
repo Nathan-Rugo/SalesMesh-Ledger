@@ -28,6 +28,7 @@
  */
 
 import { Request, Response } from 'express';
+import { field } from '../domain/unknown';
 import { hotPool, HOT_PATH_TIMEOUT_MS } from '../config/db';
 import { KEYED_HASH_RE, keyedHashMatches } from '../config/pii';
 import {
@@ -91,8 +92,7 @@ function samePayload(storedHash: string, incomingHash: string, rawBytes: Buffer)
 
 /** The account (agent code, or its HMAC when phone-like) a statement-recovered row was paid to. */
 function reconciledAccount(payload: unknown): string | null {
-  const p = payload as any;
-  const v = p?.Reconciliation?.accountNo ?? p?.BillRefNumber;
+  const v = field(payload, 'Reconciliation', 'accountNo') ?? field(payload, 'BillRefNumber');
   return typeof v === 'string' && v.trim() ? v.trim() : null;
 }
 
@@ -151,7 +151,7 @@ class WebhookController {
     const { receipt, channel, amountCents } = ingress;
 
     // ── STEP 2 — KEYED HASH OF THE BYTES AS RECEIVED ────────────────────
-    const rawBytes: Buffer = (req as any).rawBody ?? Buffer.from(JSON.stringify(body), 'utf-8');
+    const rawBytes: Buffer = req.rawBody ?? Buffer.from(JSON.stringify(body), 'utf-8');
     let hash: string;
     let redacted: unknown;
     try {

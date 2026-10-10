@@ -4,7 +4,7 @@
  * login / PIN change, wrong role — over HTTP, with an in-memory auth repository and mocked Redis.
  */
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+ 
 
 jest.mock('../src/repositories/auth.repository', () => require('./support/memory-auth-repo'));
 const mockSecurityEvents: any[] = [];

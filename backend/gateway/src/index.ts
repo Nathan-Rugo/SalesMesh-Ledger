@@ -23,7 +23,6 @@ import crypto from 'crypto';
 import express, { Request, Response, NextFunction } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
-import { v4 as uuidv4 } from 'uuid';
 
 // ── Config layer ──────────────────────────────────────────────────────
 import { redisClient, isRedisHealthy, shutdownRedis } from './config/redis';
@@ -94,8 +93,8 @@ app.use(
 
 // 3. Request ID middleware — every request gets a UUID for tracing
 app.use((req: Request, res: Response, next: NextFunction) => {
-  const reqId = uuidv4();
-  (req as any).reqId = reqId;
+  const reqId = crypto.randomUUID();
+  req.reqId = reqId;
   res.setHeader('X-Request-ID', reqId);
   next();
 });
@@ -108,7 +107,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     // Log the route pattern, not the URL: the callback URL carries a secret token.
     const path = redactPath(req.route ? `${req.baseUrl}${req.route.path}` : req.path);
     console.info(
-      `[HTTP] ${req.method} ${path} ${res.statusCode} — ${ms}ms — ReqID: ${(req as any).reqId}`
+      `[HTTP] ${req.method} ${path} ${res.statusCode} — ${ms}ms — ReqID: ${req.reqId}`
     );
   });
   next();

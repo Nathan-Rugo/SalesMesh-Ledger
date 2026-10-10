@@ -12,6 +12,10 @@ declare global {
   namespace Express {
     interface Request {
       auth?: AccessClaims;
+      /** Raw request bytes as received (webhook routes): the stored hash covers exactly these. */
+      rawBody?: Buffer;
+      /** Per-request trace id (X-Request-ID). */
+      reqId?: string;
     }
   }
 }
