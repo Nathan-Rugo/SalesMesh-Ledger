@@ -1,0 +1,6 @@
+Short Code:,174379
+Time Period:,From 01-10-2026 00:00:00 To 09-10-2026 23:59:59
+Receipt No.,Completion Time,Initiation Time,Details,Transaction Status,Paid In,Withdrawn,Balance,Reason Type,Other Party Info,Linked Transaction ID,A/C No.
+SJC3000001,09-10-2026 16:00:00,09-10-2026 16:00:00,Reversal of SJA1000001,Completed,,"-1,500.00",0.00,Reversal,254712345678 - JANE DOE,SJA1000001,AG042
+SJC3000002,09-10-2026 16:05:00,09-10-2026 16:05:00,Reversal,Completed,,-100.00,0.00,Reversal,,SJZ9999999,AG042
+SJC3000003,09-10-2026 16:10:00,09-10-2026 16:10:00,Reversal,Completed,,-50.00,0.00,Reversal,,,AG042

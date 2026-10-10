@@ -29,7 +29,7 @@ test:
 	@echo "Running ML Engine pytest suite..."
 	cd ml-engine && pytest
 	@echo "Running Gateway tests..."
-	cd backend/gateway && npm test || true
+	cd backend/gateway && npm test
 
 seed:
 	docker exec -i salesmesh-postgres psql -U salesmesh_user -d salesmesh_db < infra/scripts/init_db.sql
