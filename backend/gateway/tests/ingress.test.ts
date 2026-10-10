@@ -112,6 +112,7 @@ function mlSuccess(overrides: Record<string, any> = {}) {
       reason: 'Layer 1 fast-clear',
       latency_ms: 4.2,
       evaluated_at: new Date().toISOString(),
+      feature_vector: { velocity_v_i: 0.5, split_ratio_r_s: 0.1, entropy_gaps: 1.2, agent_zscore: 0.3, amount_to_median_ratio: 1, recipient_reuse_count: 0 },
       ...overrides,
     }),
   };
@@ -538,6 +539,7 @@ describe('Suite 3: Circuit Breaker — NFR-08 Fail-Safe', () => {
     expect(review.decision).toBe('REVIEW');
 
     mockPgQuery.mockClear();
+    jest.spyOn(escrowService, 'scoreTrust').mockResolvedValueOnce(null); // the trust step is covered against real Postgres
     await escrowService.processSettlement('tx-1', review, 150);
     expect(sqlCalls(/INSERT INTO escrow_accounts/)[0][1]![3]).toBe('QUARANTINED');
 

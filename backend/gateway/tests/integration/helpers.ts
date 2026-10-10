@@ -28,6 +28,10 @@ export const MIGRATION_003 = fs.readFileSync(
   path.join(REPO_ROOT, 'infra', 'scripts', 'migrations', '003_reconciliation.sql'),
   'utf-8'
 );
+export const MIGRATION_004 = fs.readFileSync(
+  path.join(REPO_ROOT, 'infra', 'scripts', 'migrations', '004_trust_scores.sql'),
+  'utf-8'
+);
 export const LEGACY_SQL = fs.readFileSync(path.join(__dirname, 'fixtures', 'legacy_init_db.sql'), 'utf-8');
 
 function urlFor(db: string): string {
@@ -79,8 +83,11 @@ export async function seedAgent(pool: Pool, agentCode: string | null, phone?: st
   return a.agent_id;
 }
 
-/** ml-engine stand-in for global.fetch: answers each request for its own transaction_id. */
-export function mlStub(decide: (req: any) => { decision: 'CLEAR' | 'QUARANTINE' | 'REVIEW' } | 'down') {
+/**
+ * ml-engine stand-in for global.fetch: answers each request for its own transaction_id. The
+ * decider may override any response field (e.g. layer2_adjudicated, xgb_probability).
+ */
+export function mlStub(decide: (req: any) => ({ decision: 'CLEAR' | 'QUARANTINE' | 'REVIEW' } & Record<string, unknown>) | 'down') {
   const calls: any[] = [];
   const fn = jest.fn(async (_url: string, init: { body: string }) => {
     const req = JSON.parse(init.body);
@@ -96,12 +103,13 @@ export function mlStub(decide: (req: any) => { decision: 'CLEAR' | 'QUARANTINE' 
         xgb_probability: 0.0456789,
         model_version: 'v1.0.0',
         model_sha256: 'b'.repeat(64),
-        decision: out.decision,
         triggered_layer: out.decision === 'CLEAR' ? 1 : 2,
         layer2_adjudicated: out.decision !== 'CLEAR',
         reason: 'stub',
         latency_ms: 1,
         evaluated_at: new Date().toISOString(),
+        feature_vector: { velocity_v_i: 0.5, split_ratio_r_s: 0.1, entropy_gaps: 1.2, agent_zscore: 0.3, amount_to_median_ratio: 1, recipient_reuse_count: 0 },
+        ...out,
       }),
     };
   });

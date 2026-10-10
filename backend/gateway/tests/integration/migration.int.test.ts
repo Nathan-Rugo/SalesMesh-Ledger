@@ -1,16 +1,16 @@
 /**
- * Migrations 001 + 002 + 003 against real Postgres: legacy schema + 001 + 002 + 003 == fresh init schema,
+ * Migrations 001–004 against real Postgres: legacy schema + 001 + 002 + 003 + 004 == fresh init schema,
  * legacy rows are backfilled, and re-running (or running on a fresh install) is a no-op.
  */
 
 import type { Pool } from 'pg';
-import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003, type TestDb } from './helpers';
+import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, type TestDb } from './helpers';
 
 jest.setTimeout(60_000);
 
 async function shape(pool: Pool) {
   const cols = await pool.query(
-    `SELECT table_name, column_name, data_type, is_nullable, character_maximum_length, column_default
+    `SELECT table_name, column_name, data_type, is_nullable, character_maximum_length, numeric_precision, numeric_scale, column_default
        FROM information_schema.columns WHERE table_schema = 'public' ORDER BY 1, 2`
   );
   const idx = await pool.query(`SELECT tablename, indexdef FROM pg_indexes WHERE schemaname = 'public' ORDER BY 1, 2`);
@@ -22,7 +22,7 @@ async function shape(pool: Pool) {
   return { cols: cols.rows, idx: idx.rows, cons: consSorted };
 }
 
-describeDb('migrations 001_settlement_pipeline + 002_auth_stk_initiation + 003_reconciliation', () => {
+describeDb('migrations 001_settlement_pipeline + 002_auth_stk_initiation + 003_reconciliation + 004_trust_scores', () => {
   let legacy: TestDb;
   let fresh: TestDb;
 
@@ -108,6 +108,16 @@ describeDb('migrations 001_settlement_pipeline + 002_auth_stk_initiation + 003_r
     ).rejects.toThrow(/stk_requests_accepted_has_checkout/);
     await p.query(`INSERT INTO security_events (event_type, mpesa_receipt_id, detail) VALUES ('PAYMENT_REVERSED', 'LEGACY0001', 'x')`);
 
+    // 004: every existing agent is reset to 0.5 (no history credit); the rating is NUMERIC(7,6).
+    expect((await p.query(`SELECT agent_trust_rating::text AS r FROM sales_agents`)).rows[0].r).toBe('1.000');
+    await p.query(MIGRATION_004);
+    const { rows: [ag] } = await p.query(`SELECT agent_trust_rating::text AS r, scored_txn_count FROM sales_agents`);
+    expect(ag).toEqual({ r: '0.500000', scored_txn_count: 0 });
+    const { rows: [legacyEscrow] } = await p.query(`SELECT hold_seconds, quarantine_reason FROM escrow_accounts`);
+    // Never earns a maturity credit; the quarantine reason is backfilled from the latest event (a model RESCORE here).
+    expect(legacyEscrow).toEqual({ hold_seconds: null, quarantine_reason: 'model_decision' });
+    await expect(p.query(`UPDATE escrow_accounts SET quarantine_reason = 'bogus'`)).rejects.toThrow(/escrow_accounts_quarantine_reason_check/);
+
     const [a1, b1] = await Promise.all([shape(legacy.pool), shape(fresh.pool)]);
     expect(a1.cols).toEqual(b1.cols);
     expect(a1.idx).toEqual(b1.idx);
@@ -119,15 +129,17 @@ describeDb('migrations 001_settlement_pipeline + 002_auth_stk_initiation + 003_r
     await legacy.pool.query(MIGRATION_001);
     await legacy.pool.query(MIGRATION_002);
     await legacy.pool.query(MIGRATION_003);
+    await legacy.pool.query(MIGRATION_004);
     expect(await shape(legacy.pool)).toEqual(before);
 
     const freshBefore = await shape(fresh.pool);
     await fresh.pool.query(MIGRATION_001);
     await fresh.pool.query(MIGRATION_002);
     await fresh.pool.query(MIGRATION_003);
+    await fresh.pool.query(MIGRATION_004);
     expect(await shape(fresh.pool)).toEqual(freshBefore);
     const { rows } = await fresh.pool.query(`SELECT version FROM schema_migrations ORDER BY version`);
-    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation', '003_reconciliation']);
+    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation', '003_reconciliation', '004_trust_scores']);
   });
 
   it('enforces the agent_code CHECK (upper-case, trimmed)', async () => {
@@ -158,6 +170,29 @@ describeDb('migrations 001_settlement_pipeline + 002_auth_stk_initiation + 003_r
       await expect(long.pool.query(MIGRATION_002)).rejects.toThrow(/longer than 12 characters.*ABCDEFGHIJKLM/);
     } finally {
       await long.drop();
+    }
+  });
+
+  it('004 aborts listing the duplicated verification_ids before adding UNIQUE(verification_id)', async () => {
+    const dup = await createTestDb('sm_mig_ts');
+    try {
+      const p = dup.pool;
+      for (const sql of [LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003]) await p.query(sql);
+      const { rows: [u] } = await p.query(`INSERT INTO users (full_name, phone_number, role) VALUES ('a', '254700000020', 'SALES_AGENT') RETURNING user_id`);
+      const { rows: [o] } = await p.query(`INSERT INTO retail_outlets (outlet_code, region, monthly_baseline) VALUES ('O20', 'r', 1) RETURNING outlet_id`);
+      const { rows: [a] } = await p.query(`INSERT INTO sales_agents (user_id, outlet_id) VALUES ($1, $2) RETURNING agent_id`, [u.user_id, o.outlet_id]);
+      const { rows: [t] } = await p.query(
+        `INSERT INTO transactions (agent_id, mpesa_receipt_id, raw_payload_hash, amount, source_channel, counterparty_hash)
+         VALUES ($1, 'TSDUP00001', 'h', 100, 'C2B', 'c') RETURNING transaction_id`,
+        [a.agent_id]
+      );
+      const { rows: [v] } = await p.query(`INSERT INTO verification_events (transaction_id, model_version, decision) VALUES ($1, 'v', 'CLEAR') RETURNING verification_id`, [t.transaction_id]);
+      for (let i = 0; i < 2; i++) {
+        await p.query(`INSERT INTO trust_scores (verification_id, velocity_score, split_ratio_score, final_trust_index) VALUES ($1, 0, 0, 0.5)`, [v.verification_id]);
+      }
+      await expect(p.query(MIGRATION_004)).rejects.toThrow(new RegExp(`several rows per verification_id.*${v.verification_id}`));
+    } finally {
+      await dup.drop();
     }
   });
 

@@ -14,7 +14,8 @@
  *      reports which of these apply);
  *   5. the original file is copied to <evidence dir>/<sha256>/ (directory 0700, file 0600);
  *   6. per row, in its own transaction:
- *        credit, receipt already known → verified (amount, account / agent code, time); a
+ *        credit, receipt already known → verified (amount, account / agent code, time; a verified
+ *          receipt credits its agent's trust rating once, spec gh-23); a
  *          mismatch raises RECONCILE_AMOUNT_MISMATCH / RECONCILE_ATTRIBUTION_CONFLICT (+ hold);
  *        credit, new → bound (row lock) to exactly one eligible STK request → STK-shaped intake
  *          row carrying stkRequestId (and the request's CheckoutRequestID when it has one); a
@@ -81,6 +82,7 @@ import {
 } from '../repositories/reconcile.repository';
 import { insertSecurityEvent, securityHoldReceipt, type SecurityEventType } from '../repositories/security.repository';
 import { RECONCILE_BINDABLE } from '../repositories/stk.repository';
+import { creditReceipt } from '../repositories/trust.repository';
 import { parseStatement, StatementError, type NonCreditReason, type Statement, type StatementRow } from './statement';
 
 export class ImportRejected extends Error {
@@ -316,6 +318,8 @@ async function verifyKnown(db: Db, row: StatementRow, k: KnownReceipt, ctx: Ctx)
   }
   ctx.counts.verified += 1;
   ctx.actions.push(`${where} known receipt, verified`);
+  // Spec gh-23: independent evidence the money was legitimate → +β, once per receipt (re-import: none).
+  if (ctx.write) await creditReceipt(db, 'STATEMENT_CONFIRMED', row.receipt);
 }
 
 async function processCredit(db: Db, row: StatementRow, ctx: Ctx): Promise<void> {

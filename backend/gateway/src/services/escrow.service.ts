@@ -5,7 +5,10 @@
  */
 
 import pool from '../config/db';
+import { trustParams } from '../config/trust';
+import { assess, QUARANTINE_HOLD_HOURS, type TrustAssessment, type TrustParams } from '../domain/trust';
 import { withTransaction, type Db, type TxDb } from '../repositories/db.types';
+import { agentMaturity, insertTrustScore, lockAgentRating, medianSettledAmount, penaliseReceipt } from '../repositories/trust.repository';
 import { RiskEvaluationResponse } from './risk_client.service';
 
 export interface TransactionRecord {
@@ -21,9 +24,32 @@ export interface TransactionRecord {
 
 export type VerificationKind = 'INITIAL' | 'RESCORE';
 
-/** Fixed holds for now; risk-adaptive T_hold is the next spec. */
-export const CLEAR_HOLD_HOURS = 24;
-export const QUARANTINE_HOLD_HOURS = 72;
+/** Every quarantine waits the standard 72 h; a model CLEAR waits the risk-adaptive T_hold (spec gh-23). */
+export { QUARANTINE_HOLD_HOURS };
+
+export type QuarantineReason = 'security_hold' | 'fail_safe' | 'model_decision' | 'trust_below_threshold' | 'trust_input_invalid';
+
+export type EscrowStatus = 'HELD' | 'QUARANTINED' | 'RELEASED';
+
+export interface EscrowOutcome {
+  status: 'HELD' | 'QUARANTINED';
+  reason: QuarantineReason | null;
+  holdSeconds: number;
+}
+
+/**
+ * NFR-08 + spec gh-23: only a model-made CLEAR with a valid trust score above the freeze threshold
+ * is HELD, for T_hold. Everything else is QUARANTINED for 72 h, with the reason.
+ */
+export function escrowOutcome(risk: RiskEvaluationResponse, securityHold: boolean, trust: TrustAssessment | null): EscrowOutcome {
+  const q = (reason: QuarantineReason): EscrowOutcome => ({ status: 'QUARANTINED', reason, holdSeconds: QUARANTINE_HOLD_HOURS * 3600 });
+  if (securityHold) return q('security_hold');
+  if (risk.is_fail_safe) return q('fail_safe');
+  if (risk.decision !== 'CLEAR') return q('model_decision');
+  if (!trust) return q('trust_input_invalid');
+  if (trust.frozen) return q('trust_below_threshold');
+  return { status: 'HELD', reason: null, holdSeconds: trust.holdSeconds };
+}
 
 export interface SettlementOptions {
   /** Run inside the caller's transaction instead of opening one. */
@@ -35,11 +61,54 @@ export interface SettlementOptions {
   historyReceipts?: string[];
 }
 
-/** NFR-08: only an explicit, model-made CLEAR is held normally. */
-export const isModelClear = (r: RiskEvaluationResponse): boolean => r.decision === 'CLEAR' && !r.is_fail_safe;
-
 export class EscrowService {
-  constructor(private readonly db: TxDb = pool) {}
+  private params: TrustParams | undefined;
+
+  constructor(private readonly db: TxDb = pool, params?: TrustParams) {
+    this.params = params;
+  }
+
+  /** Read lazily: an invalid trust configuration is reported by preflight, not at import. */
+  private get trust(): TrustParams {
+    return (this.params ??= trustParams());
+  }
+
+  private async subject(db: Db, transactionId: string) {
+    const { rows } = await db.query<{ agent_id: string; receipt: string; amount: string; ts: Date }>(
+      `SELECT agent_id, mpesa_receipt_id AS receipt, amount::text AS amount, timestamp AS ts FROM transactions WHERE transaction_id = $1`,
+      [transactionId]
+    );
+    const r = rows[0];
+    return r ? { agentId: r.agent_id, receipt: r.receipt, amount: Number(r.amount), at: new Date(r.ts) } : null;
+  }
+
+  /**
+   * Spec gh-23: locks the agent row (last, FOR NO KEY UPDATE), computes S_t / T_hold from the rating
+   * read under that lock, and writes the trust row for this verification. null for a fail-safe (no p)
+   * or invalid inputs: no S_t, the caller quarantines (fail closed).
+   */
+  public async scoreTrust(db: Db, transactionId: string, verificationId: string, risk: RiskEvaluationResponse): Promise<TrustAssessment | null> {
+    if (risk.is_fail_safe || !risk.feature_vector) return null;
+    const t = await this.subject(db, transactionId);
+    if (!t) {
+      console.error(`[Trust] transaction ${transactionId} not found; no trust score (failing closed)`);
+      return null;
+    }
+    const rating = await lockAgentRating(db, t.agentId);
+    if (rating === null) {
+      console.error(`[Trust] agent ${t.agentId} of transaction ${transactionId} not found; no trust score (failing closed)`);
+      return null;
+    }
+    const maturity = await agentMaturity(db, t.agentId);
+    const median = await medianSettledAmount(db, { agentId: t.agentId, at: t.at, excludeReceipt: t.receipt, days: this.trust.medianDays });
+    const assessment = assess({ risk, rating, maturity, amount: t.amount, median: median.median, settledCount: median.count }, this.trust);
+    if (!assessment) {
+      console.error(`[Trust] ${t.receipt}: trust inputs out of range (p/s/R); failing closed`);
+      return null;
+    }
+    await insertTrustScore(db, { verificationId, agentId: t.agentId, assessment, features: risk.feature_vector }, this.trust);
+    return assessment;
+  }
 
   /**
    * Upserts the transaction (Data Dictionary Table 5) and returns its id — the existing one when
@@ -124,37 +193,47 @@ export class EscrowService {
   }
 
   /**
-   * Records the INITIAL verification outcome and the escrow hold atomically.
-   * Ref: Data Dictionary Tables 6 (VERIFICATION_EVENTS) and 8 (ESCROW_ACCOUNTS)
+   * Records the INITIAL verification outcome, the trust row and the escrow hold atomically.
+   * Ref: Data Dictionary Tables 6 (VERIFICATION_EVENTS), 7 (TRUST_SCORES) and 8 (ESCROW_ACCOUNTS)
    *
-   * NFR-08: only an explicit, model-made CLEAR is held normally; REVIEW, QUARANTINE,
-   * fail-safe and security-held decisions are quarantined. Re-running is a no-op.
+   * NFR-08: only an explicit, model-made CLEAR above the trust freeze is HELD (for T_hold); REVIEW,
+   * QUARANTINE, fail-safe, frozen and security-held decisions are quarantined. A security-held
+   * receipt also penalises the agent (idempotent). Re-running is a no-op.
    */
   public async processSettlement(
     transactionId: string,
     riskResponse: RiskEvaluationResponse,
     grossCommission: number | string,
     options: SettlementOptions = {}
-  ): Promise<{ escrowStatus: 'HELD' | 'QUARANTINED'; created: boolean }> {
-    const cleared = isModelClear(riskResponse) && !options.securityHold;
-    const status = cleared ? 'HELD' : 'QUARANTINED';
-    const holdHours = cleared ? CLEAR_HOLD_HOURS : QUARANTINE_HOLD_HOURS;
+  ): Promise<{ escrowStatus: EscrowStatus; created: boolean }> {
+    const securityHold = options.securityHold ?? false;
     const gross = typeof grossCommission === 'number' ? grossCommission.toFixed(2) : grossCommission;
 
-    const run = async (db: Db) => {
+    // Already settled: report what was persisted, not what this run computed.
+    const persisted = async (db: Db) => {
+      const { rows } = await db.query<{ escrow_status: EscrowStatus }>('SELECT escrow_status FROM escrow_accounts WHERE transaction_id = $1', [transactionId]);
+      return { escrowStatus: rows[0]?.escrow_status ?? 'QUARANTINED', created: false };
+    };
+    const run = async (db: Db): Promise<{ escrowStatus: EscrowStatus; created: boolean }> => {
       const verificationId = await this.insertVerificationEvent(
         db, transactionId, riskResponse, 'INITIAL', options.historyTruncated ?? false, options.historyReceipts ?? null
       );
-      if (!verificationId) return { escrowStatus: status, created: false } as const; // already settled
+      if (!verificationId) return persisted(db);
+      const trust = await this.scoreTrust(db, transactionId, verificationId, riskResponse);
+      const outcome = escrowOutcome(riskResponse, securityHold, trust);
       const { rows } = await db.query(
         `INSERT INTO escrow_accounts (transaction_id, gross_commission, hold_period_hours, escrow_status,
-                                      security_hold, release_due_at)
-         VALUES ($1, $2, $3::int, $4, $5, NOW() + make_interval(hours => $3::int))
+                                      security_hold, release_due_at, hold_seconds, quarantine_reason)
+         VALUES ($1, $2, $3::int, $4, $5, NOW() + make_interval(secs => $6::int), $6::int, $7)
          ON CONFLICT (transaction_id) DO NOTHING
          RETURNING escrow_id`,
-        [transactionId, gross, holdHours, status, options.securityHold ?? false]
+        [transactionId, gross, Math.ceil(outcome.holdSeconds / 3600), outcome.status, securityHold, outcome.holdSeconds, outcome.reason]
       );
-      return { escrowStatus: status, created: rows.length > 0 } as const;
+      if (securityHold) {
+        const t = await this.subject(db, transactionId);
+        if (t) await penaliseReceipt(db, t.receipt, this.trust);
+      }
+      return rows.length > 0 ? { escrowStatus: outcome.status, created: true } : persisted(db);
     };
 
     return options.client ? run(options.client) : withTransaction(this.db, run);

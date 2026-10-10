@@ -62,6 +62,7 @@ import {
 } from '../repositories/intake.repository';
 import { hasSecurityHold, insertSecurityEvent, recordChannelEcho, recordPayloadMutation } from '../repositories/security.repository';
 import { fetchHistory } from '../repositories/transaction.repository';
+import { creditReceipt, findMaturedHolds } from '../repositories/trust.repository';
 import { EscrowService, escrowService } from '../services/escrow.service';
 import { resilientRiskClient, type ResilientRiskClient } from '../services/risk_client.service';
 import { spoolService, type SpoolItem, type SpoolService } from '../services/spool.service';
@@ -193,6 +194,20 @@ export class SettlementWorker {
     if (dead > 0) console.error(`[SettlementWorker] ${dead} intake row(s) moved to DEAD (lease expired, attempts exhausted)`);
     await this.drainSpool().catch((e) => console.error('[SettlementWorker] spool drain failed:', (e as Error).message));
     await this.stkAndAuthHousekeeping().catch((e) => console.error('[SettlementWorker] STK/auth housekeeping failed:', (e as Error).message));
+    await this.creditMaturedHolds().catch((e) => console.error('[SettlementWorker] trust maturity sweep failed:', (e as Error).message));
+  }
+
+  /**
+   * Spec gh-23: +β for each HELD escrow whose release_due_at passed with no security event on its
+   * receipt (HOLD_MATURED_CLEAN), once per receipt, under the per-agent daily cap. Maturity only
+   * feeds trust: nothing is released or paid here. Returns the number of credits applied.
+   */
+  public async creditMaturedHolds(limit = 100): Promise<number> {
+    let credited = 0;
+    for (const receipt of await findMaturedHolds(this.pool, limit)) {
+      if ((await withTransaction(this.pool, (tx) => creditReceipt(tx, 'HOLD_MATURED_CLEAN', receipt))) !== null) credited += 1;
+    }
+    return credited;
   }
 
   /**
@@ -213,6 +228,9 @@ export class SettlementWorker {
   /** Claims one batch and processes it; returns the number of rows claimed. */
   public async runOnce(): Promise<number> {
     const rows = await claimBatch(this.pool, this.config.batchSize, this.config.visibilityTimeoutMs, this.config.maxAttempts);
+    // UPDATE … RETURNING does not preserve the subquery's ORDER BY: settle first-in first-out, so
+    // order-dependent effects (trust penalties before a later payment's hold) follow arrival order.
+    rows.sort((a, b) => new Date(a.received_at).getTime() - new Date(b.received_at).getTime());
     for (const row of rows) {
       await this.process(row);
     }

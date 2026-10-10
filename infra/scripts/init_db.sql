@@ -2,7 +2,8 @@
 -- Aligned with Chapter 4 Data Dictionary (Tables 4.6 - 4.17), plus the settlement-pipeline
 -- tables (mpesa_callbacks, stk_requests, security_events) from spec gh-6, the auth / STK
 -- initiation tables (user_credentials, refresh_tokens, auth_events) from spec gh-5, and the Daraja
--- reconciliation tables (reconciliation_runs, reconciliation_exceptions) from spec gh-6-recon.
+-- reconciliation tables (reconciliation_runs, reconciliation_exceptions) from spec gh-6-recon, and
+-- the trust tables (trust_config_snapshots, agent_trust_events, extended trust_scores) from spec gh-23.
 --
 -- Existing databases are brought to this shape by infra/scripts/migrations/*.sql; a fresh
 -- install records those migrations as already applied (see schema_migrations at the end).
@@ -96,7 +97,11 @@ CREATE TABLE IF NOT EXISTS sales_agents (
     agent_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     outlet_id UUID NOT NULL REFERENCES retail_outlets(outlet_id) ON DELETE RESTRICT,
-    agent_trust_rating DECIMAL(4,3) NOT NULL DEFAULT 1.000 CHECK (agent_trust_rating BETWEEN 0.000 AND 1.000),
+    -- Outcome-based rating R (spec gh-23): credits from matured clean holds / statement confirmations,
+    -- penalties per security-hold event (audited in agent_trust_events). Default 0.5 deviates from the
+    -- data dictionary's 1.000 on purpose: trust is earned, never granted on sign-up.
+    agent_trust_rating NUMERIC(7,6) NOT NULL DEFAULT 0.5 CHECK (agent_trust_rating BETWEEN 0.000 AND 1.000),
+    scored_txn_count INTEGER NOT NULL DEFAULT 0,      -- model-scored verifications with a trust row
     agent_code VARCHAR(32) UNIQUE
         CONSTRAINT sales_agents_agent_code_normalised CHECK (agent_code = UPPER(BTRIM(agent_code)) AND agent_code <> '')
         -- It is also the Daraja AccountReference, which is at most 12 characters.
@@ -290,14 +295,53 @@ CREATE UNIQUE INDEX IF NOT EXISTS verification_events_initial_uq
 CREATE INDEX IF NOT EXISTS verification_events_latest_idx
     ON verification_events (transaction_id, evaluated_at DESC);
 
--- Table 7: TRUST_SCORES
+-- Trust parameters in force (spec gh-23): one row per distinct parameter set, keyed by its SHA-256.
+CREATE TABLE IF NOT EXISTS trust_config_snapshots (
+    config_hash VARCHAR(64) PRIMARY KEY,
+    params JSONB NOT NULL,
+    formula_version VARCHAR(16) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Table 7: TRUST_SCORES (extended, spec gh-23): one row per model-scored verification. S_t is
+-- recomputable from p_used, agent_rating_used and the snapshot's tx weight; the hold from S_t,
+-- amount_factor and the snapshot. velocity / split are an audit snapshot of the scored features.
 CREATE TABLE IF NOT EXISTS trust_scores (
     trust_score_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    verification_id UUID NOT NULL REFERENCES verification_events(verification_id) ON DELETE CASCADE,
+    verification_id UUID NOT NULL UNIQUE REFERENCES verification_events(verification_id) ON DELETE CASCADE,
     velocity_score DECIMAL(8,4) NOT NULL,
     split_ratio_score DECIMAL(5,4) NOT NULL,
-    final_trust_index DECIMAL(5,4) NOT NULL
+    final_trust_index NUMERIC(7,6) NOT NULL,         -- S_t (the freeze compares this stored value)
+    transaction_trust NUMERIC(7,6),                  -- 1 - p_used
+    p_used NUMERIC(7,6),
+    p_source VARCHAR(20) CHECK (p_source IN ('xgb', 'isolation_proxy')),
+    agent_rating_used NUMERIC(7,6),                  -- R_eff
+    amount_factor NUMERIC(14,6),                     -- m
+    hold_seconds INTEGER,                            -- T_hold as computed (the escrow may be quarantined instead)
+    hold_reason VARCHAR(12) CHECK (hold_reason IN ('transaction', 'agent', 'amount')),
+    config_hash VARCHAR(64) REFERENCES trust_config_snapshots(config_hash) ON DELETE RESTRICT,
+    formula_version VARCHAR(16),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS trust_scores_created_idx ON trust_scores (created_at);
+
+-- Every agent rating change (spec gh-23), idempotent per (cause, ref): credits ref the receipt,
+-- penalties "event_type:receipt", operator adjustments "operator:<agent_id>:<ref>". The agent FK is
+-- ON DELETE RESTRICT on purpose: the rating audit trail must outlive any attempt to delete the agent.
+CREATE TABLE IF NOT EXISTS agent_trust_events (
+    trust_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id UUID NOT NULL REFERENCES sales_agents(agent_id) ON DELETE RESTRICT,
+    cause VARCHAR(30) NOT NULL
+        CHECK (cause IN ('HOLD_MATURED_CLEAN', 'STATEMENT_CONFIRMED', 'SECURITY_PENALTY', 'OPERATOR_ADJUST')),
+    ref VARCHAR(200) NOT NULL,
+    old_rating NUMERIC(7,6) NOT NULL,
+    new_rating NUMERIC(7,6) NOT NULL,
+    delta NUMERIC(8,6) NOT NULL,
+    detail TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT agent_trust_events_cause_ref_key UNIQUE (cause, ref)
+);
+CREATE INDEX IF NOT EXISTS agent_trust_events_agent_idx ON agent_trust_events (agent_id, cause, created_at);
 
 -- Table 8: ESCROW_ACCOUNTS
 CREATE TABLE IF NOT EXISTS escrow_accounts (
@@ -311,10 +355,17 @@ CREATE TABLE IF NOT EXISTS escrow_accounts (
     rescore_attempts INTEGER NOT NULL DEFAULT 0,
     next_rescore_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     rescore_claimed_at TIMESTAMPTZ,
-    rescore_claim_token UUID
+    rescore_claim_token UUID,
+    hold_seconds INTEGER,                            -- T_hold (spec gh-23); NULL on legacy rows
+    quarantine_reason VARCHAR(40)                    -- why a QUARANTINED escrow is quarantined (NULL while HELD)
+        CONSTRAINT escrow_accounts_quarantine_reason_check CHECK (quarantine_reason IN (
+        'security_hold', 'fail_safe', 'model_decision', 'trust_below_threshold', 'trust_input_invalid'))
 );
 CREATE INDEX IF NOT EXISTS escrow_accounts_rescore_idx
     ON escrow_accounts (next_rescore_at) WHERE escrow_status = 'QUARANTINED' AND NOT security_hold;
+-- Trust maturity sweep (spec gh-23): matured holds decided under the trust regime.
+CREATE INDEX IF NOT EXISTS escrow_accounts_matured_idx
+    ON escrow_accounts (release_due_at) WHERE escrow_status IN ('HELD', 'RELEASED') AND hold_seconds IS NOT NULL;
 
 -- Reconciliation exceptions an operator must act on (spec gh-6-recon): a reversal of a payment whose
 -- escrow was already RELEASED (CLAWBACK_DUE), or a RELEASED payment missing from the statement.
@@ -370,5 +421,6 @@ CREATE TABLE IF NOT EXISTS payout_disbursements (
 );
 
 -- A fresh install already has every migration's shape.
-INSERT INTO schema_migrations (version) VALUES ('001_settlement_pipeline'), ('002_auth_stk_initiation'), ('003_reconciliation')
+INSERT INTO schema_migrations (version) VALUES ('001_settlement_pipeline'), ('002_auth_stk_initiation'), ('003_reconciliation'),
+                                               ('004_trust_scores')
     ON CONFLICT (version) DO NOTHING;
