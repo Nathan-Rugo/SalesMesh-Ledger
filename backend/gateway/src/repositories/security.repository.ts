@@ -5,38 +5,13 @@
  * (refresh token reuse, login lockout, PIN change).
  */
 
+import { SECURITY_HOLD_EVENTS, type SecurityEventType } from '../domain/security_events';
 import type { Db, TxDb } from './db.types';
 import { withTransaction } from './db.types';
+import { penaliseReceipt } from './trust.repository';
 
-export type SecurityEventType =
-  | 'ADMIN_UNLOCK'
-  | 'ADMIN_DISABLE'
-  | 'ADMIN_PIN_RESET'
-  | 'PAYLOAD_MUTATION'
-  | 'STK_RECEIPT_REPLAY'
-  | 'STK_CHANNEL_ECHO'
-  | 'REFRESH_TOKEN_REUSE'
-  | 'LOGIN_LOCKOUT'
-  | 'PIN_CHANGED'
-  // Reconciliation (spec gh-6-recon)
-  | 'RECONCILE_AMOUNT_MISMATCH'
-  | 'PAYMENT_REVERSED'
-  | 'RECONCILED_CALLBACK_LATE'
-  | 'RECONCILE_ATTRIBUTION_CONFLICT'
-  | 'RECONCILE_NOT_ON_STATEMENT'
-  | 'STK_STATUS_CONFLICT';
-
-/**
- * Receipt events that put the receipt's escrow on security hold (QUARANTINED, never self-healed),
- * whether it is settled before or after the event is recorded.
- */
-export const SECURITY_HOLD_EVENTS: readonly SecurityEventType[] = [
-  'PAYLOAD_MUTATION',
-  'PAYMENT_REVERSED',
-  'RECONCILE_AMOUNT_MISMATCH',
-  'RECONCILE_ATTRIBUTION_CONFLICT',
-  'RECONCILE_NOT_ON_STATEMENT',
-];
+// The event types live in a leaf module (trust.repository needs them too, without an import cycle).
+export { SECURITY_HOLD_EVENTS, type SecurityEventType } from '../domain/security_events';
 
 /** Receipt-subject alarm; deduplicated on (type, receipt, incoming hash). */
 export async function insertSecurityEvent(
@@ -55,7 +30,9 @@ export async function insertSecurityEvent(
 /**
  * Forces the receipt's escrow to QUARANTINED with security_hold (self-heal never touches it).
  * A RELEASED escrow is never changed (nothing is clawed back automatically): it is returned so
- * the caller can record an exception for an operator.
+ * the caller can record an exception for an operator. The agent's rating is penalised once per
+ * security-hold event on the receipt (spec gh-23), whatever the escrow's status; the agent row is
+ * locked last.
  */
 export async function securityHoldReceipt(
   db: Db,
@@ -63,7 +40,7 @@ export async function securityHoldReceipt(
 ): Promise<{ held: number; released: Array<{ escrowId: string; amount: string }> }> {
   const { rowCount } = await db.query(
     `UPDATE escrow_accounts e
-        SET escrow_status = 'QUARANTINED', security_hold = TRUE,
+        SET escrow_status = 'QUARANTINED', security_hold = TRUE, quarantine_reason = 'security_hold',
             rescore_claimed_at = NULL, rescore_claim_token = NULL
        FROM transactions t
       WHERE t.transaction_id = e.transaction_id AND t.mpesa_receipt_id = $1
@@ -75,6 +52,7 @@ export async function securityHoldReceipt(
       WHERE t.mpesa_receipt_id = $1 AND e.escrow_status = 'RELEASED'`,
     [receipt]
   );
+  await penaliseReceipt(db, receipt);
   return { held: rowCount ?? 0, released: rows.map((r) => ({ escrowId: r.escrow_id, amount: r.amount })) };
 }
 
@@ -143,13 +121,14 @@ export async function recordPayloadMutation(
     });
     await client.query(
       `UPDATE escrow_accounts e
-          SET escrow_status = 'QUARANTINED', security_hold = TRUE,
+          SET escrow_status = 'QUARANTINED', security_hold = TRUE, quarantine_reason = 'security_hold',
               rescore_claimed_at = NULL, rescore_claim_token = NULL
          FROM transactions t
         WHERE t.transaction_id = e.transaction_id AND t.mpesa_receipt_id = $1
           AND e.escrow_status <> 'RELEASED'`,
       [receipt]
     );
+    await penaliseReceipt(client, receipt);
   });
 }
 

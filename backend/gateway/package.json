@@ -18,6 +18,7 @@
     "user:reset-pin": "node dist/scripts/user-admin.js reset-pin",
     "keys:generate": "node dist/scripts/keys-generate.js",
     "reconcile:import": "node dist/scripts/reconcile-import.js",
+    "trust:adjust": "node dist/scripts/trust-adjust.js",
     "lint:fix": "eslint . --fix"
   },
   "dependencies": {

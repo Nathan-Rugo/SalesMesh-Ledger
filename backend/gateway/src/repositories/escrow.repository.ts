@@ -98,18 +98,23 @@ export async function lockRescoreLease(db: Db, escrowId: string, token: string):
   return rows.length === 1;
 }
 
-/** Guarded promote: model CLEAR moves QUARANTINED → HELD, 24 h from the re-score. */
-export async function promoteToHeld(db: Db, escrowId: string, token: string, holdHours: number): Promise<boolean> {
+/** Guarded promote: model CLEAR moves QUARANTINED → HELD, T_hold (seconds) from the re-score. */
+export async function promoteToHeld(db: Db, escrowId: string, token: string, holdSeconds: number): Promise<boolean> {
   const { rowCount } = await db.query(
     `UPDATE escrow_accounts
-        SET escrow_status = 'HELD', hold_period_hours = $3::int,
-            release_due_at = NOW() + make_interval(hours => $3::int),
+        SET escrow_status = 'HELD', hold_period_hours = CEIL($3::int / 3600.0)::int, hold_seconds = $3::int,
+            release_due_at = NOW() + make_interval(secs => $3::int), quarantine_reason = NULL,
             rescore_claimed_at = NULL, rescore_claim_token = NULL
       WHERE escrow_id = $1 AND rescore_claim_token = $2
         AND escrow_status = 'QUARANTINED' AND NOT security_hold`,
-    [escrowId, token, holdHours]
+    [escrowId, token, holdSeconds]
   );
   return rowCount === 1;
+}
+
+/** A re-score that ended in a model-made quarantine (REVIEW / QUARANTINE / trust freeze) records why. */
+export async function setQuarantineReason(db: Db, escrowId: string, reason: string): Promise<void> {
+  await db.query(`UPDATE escrow_accounts SET quarantine_reason = $2 WHERE escrow_id = $1 AND escrow_status = 'QUARANTINED'`, [escrowId, reason]);
 }
 
 /** Ends our lease; the next attempt waits `delayMs` (re-score failures back off). */
@@ -132,9 +137,10 @@ export async function releaseRescoreLease(
 }
 
 /**
- * Fail-safe quarantines (health endpoint): `awaitingSelfHeal` can still be re-scored;
- * `stalledQuarantines` never will (security hold, non-retryable cause, attempts exhausted)
- * and need an operator.
+ * Quarantines (health endpoint): `awaitingSelfHeal` are fail-safes that can still be re-scored;
+ * `stalledQuarantines` never will and need an operator: fail-safes that are security-held, have a
+ * non-retryable cause or exhausted their attempts, plus trust quarantines (spec gh-23:
+ * trust_below_threshold, trust_input_invalid).
  */
 export async function quarantineStats(
   db: Db,
@@ -142,11 +148,12 @@ export async function quarantineStats(
 ): Promise<{ awaitingSelfHeal: number; stalledQuarantines: number }> {
   const { rows } = await db.query<{ awaiting: number; stalled: number }>(
     `SELECT count(*) FILTER (WHERE eligible)::int AS awaiting, count(*) FILTER (WHERE NOT eligible)::int AS stalled
-       FROM (SELECT COALESCE(NOT e.security_hold AND lv.fail_safe_cause = ANY($1::text[])
+       FROM (SELECT COALESCE(lv.is_fail_safe AND NOT e.security_hold AND lv.fail_safe_cause = ANY($1::text[])
                              AND e.rescore_attempts < $2, FALSE) AS eligible
                FROM escrow_accounts e
                JOIN LATERAL (${LATEST_EVENT}) lv ON TRUE
-              WHERE e.escrow_status = 'QUARANTINED' AND lv.is_fail_safe) q`,
+              WHERE e.escrow_status = 'QUARANTINED'
+                AND (lv.is_fail_safe OR e.quarantine_reason IN ('trust_below_threshold', 'trust_input_invalid'))) q`,
     [RETRYABLE_FAIL_SAFE_CAUSES, maxAttempts]
   );
   return { awaitingSelfHeal: rows[0]?.awaiting ?? 0, stalledQuarantines: rows[0]?.stalled ?? 0 };

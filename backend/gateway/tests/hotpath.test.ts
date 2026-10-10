@@ -402,6 +402,10 @@ describe('/health/details observability', () => {
         return { rows: [{ pending: 3, processing: 1, oldest: 12.5, unresolved: 2, failed: 0, dead: 1 }], rowCount: 1 };
       }
       if (/AS awaiting/.test(text)) return { rows: [{ awaiting: 4, stalled: 2 }], rowCount: 1 };
+      // spec gh-23: trust stats
+      if (/avg\(final_trust_index\)/.test(text)) return { rows: [{ n: 3, avg: 0.9, p50: 1.5, p90: 3, max: 4, reasons: { transaction: 3 } }], rowCount: 1 };
+      if (/GROUP BY 1/.test(text) && /quarantine_reason/.test(text)) return { rows: [{ reason: 'trust_below_threshold', n: 2 }], rowCount: 1 };
+      if (/FROM sales_agents WHERE agent_trust_rating <=/.test(text)) return { rows: [{ n: 1 }], rowCount: 1 };
       if (/AS paid_unconfirmed/.test(text)) {
         // spec gh-6-recon: only unconsumed requests are counted
         expect(text).toContain('consumed_receipt IS NULL');
@@ -435,6 +439,15 @@ describe('/health/details observability', () => {
     expect(res.body.circuitBreaker.state).toBe('CLOSED');
     expect(res.body.ml).toMatchObject({ timeoutMs: 500, timeoutRate: 0 });
     expect(res.body).toHaveProperty('spoolDepth');
+    expect(res.body).toHaveProperty('trust');
+    expect(res.body.trust).toMatchObject({
+      frozenAgents: 1,
+      scored24h: 3,
+      avgTrustIndex24h: 0.9,
+      holdHours24h: { p50: 1.5, p90: 3, max: 4 },
+      holdReason24h: { transaction: 3 },
+      quarantinedByReason: { trust_below_threshold: 2 },
+    });
     // spec gh-5: login, STK-outcome and Daraja-latency counters
     expect(res.body.login).toMatchObject({ success: expect.any(Number), failure: expect.any(Number), throttled: expect.any(Number) });
     expect(res.body.stk).toMatchObject({ ACCEPTED: expect.any(Number), REJECTED: expect.any(Number), UNKNOWN: expect.any(Number) });

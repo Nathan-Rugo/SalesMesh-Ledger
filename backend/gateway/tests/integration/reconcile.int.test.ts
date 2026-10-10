@@ -394,6 +394,11 @@ describeDb('Daraja reconciliation (real Postgres)', () => {
       await insertIntake(db.pool, { receipt: r, hash: idempotencyService.hashPayload(Buffer.from(JSON.stringify(body))), channel: 'C2B', payload: redactPayload(body) });
     }
     await drain();
+    // A dry run verifies but never moves trust.
+    const dry = await run(statement([{ receipt: ok, completion: t, paidIn: '500.00', ac: ag }], { from: new Date(Date.now() - 4 * 86_400_000) }), { dryRun: true });
+    expect(dry.counts.verified).toBe(1);
+    expect(await count(db.pool, `SELECT count(*) AS n FROM agent_trust_events WHERE agent_id = $1`, [agentId])).toBe(0);
+    expect((await db.pool.query(`SELECT agent_trust_rating::text AS r FROM sales_agents WHERE agent_id = $1`, [agentId])).rows[0].r).toBe('0.500000');
     const report = await run(statement([
       { receipt: ok, completion: t, paidIn: '500.00', ac: ag },
       { receipt: bad, completion: t, paidIn: '5,000.00', ac: ag },
@@ -410,7 +415,29 @@ describeDb('Daraja reconciliation (real Postgres)', () => {
     expect(rows.find((x) => x.r === ok)).toMatchObject({ escrow_status: 'HELD', security_hold: false });
     expect(rows.find((x) => x.r === bad)).toMatchObject({ escrow_status: 'QUARANTINED', security_hold: true });
     expect(await count(db.pool, `SELECT count(*) AS n FROM mpesa_callbacks`)).toBe(3);
-    expect(agentId).toBeTruthy();
+
+    // Spec gh-23: the verified receipt credits its agent (+β), each alarm penalises (−0.15), once each —
+    // also when another statement (different file) lists the same rows again.
+    const trust = async () => ({
+      rating: (await db.pool.query(`SELECT agent_trust_rating::text AS r FROM sales_agents WHERE agent_id = $1`, [agentId])).rows[0].r,
+      events: (await db.pool.query(`SELECT cause, ref FROM agent_trust_events WHERE agent_id = $1 ORDER BY cause, ref`, [agentId])).rows,
+    });
+    const expected = {
+      rating: '0.225000', // 0.5 → 0.525 → 0.375 → 0.225
+      events: [
+        { cause: 'SECURITY_PENALTY', ref: `RECONCILE_AMOUNT_MISMATCH:${bad}` },
+        { cause: 'SECURITY_PENALTY', ref: `RECONCILE_ATTRIBUTION_CONFLICT:${other}` },
+        { cause: 'STATEMENT_CONFIRMED', ref: ok },
+      ],
+    };
+    expect(await trust()).toEqual(expected);
+    const reimport = await run(statement([
+      { receipt: ok, completion: t, paidIn: '500.00', ac: ag },
+      { receipt: bad, completion: t, paidIn: '5,000.00', ac: ag },
+      { receipt: other, completion: t, paidIn: '500.00', ac: 'ZZOTHER' },
+    ], { from: new Date(Date.now() - 3 * 86_400_000) }));
+    expect(reimport.outcome).toBe('COMPLETED');
+    expect(await trust()).toEqual(expected);
   });
 
   it('reversals: known HELD → PAYMENT_REVERSED + security-held QUARANTINED; RELEASED → CLAWBACK_DUE; unknown → event only', async () => {
@@ -579,10 +606,23 @@ describeDb('Daraja reconciliation (real Postgres)', () => {
         { event_type: 'RECONCILE_NOT_ON_STATEMENT', mpesa_receipt_id: omitted },
       ]
     );
+    // `listed` settles strictly after the two others (a claimed batch has no guaranteed order).
+    await db.pool.query(`UPDATE mpesa_callbacks SET next_attempt_at = NOW() + interval '1 hour' WHERE mpesa_receipt_id = $1`, [listed]);
+    await drain();
+    await db.pool.query(`UPDATE mpesa_callbacks SET next_attempt_at = NOW() WHERE mpesa_receipt_id = $1`, [listed]);
     await drain();
     expect(await escrowOf(omitted)).toEqual({ escrow_status: 'QUARANTINED', security_hold: true });
     expect(await escrowOf(reversed)).toEqual({ escrow_status: 'QUARANTINED', security_hold: true });
-    expect(await escrowOf(listed)).toEqual({ escrow_status: 'HELD', security_hold: false });
+    // The listed payment is clean: never security-held. It settles after the two others, whose
+    // settlement penalised its agent twice (0.5 → 0.2, spec gh-23): its CLEAR is frozen.
+    const { rows } = await db.pool.query(
+      `SELECT e.escrow_status, e.security_hold, e.quarantine_reason, a.agent_trust_rating::float8 AS rating
+         FROM escrow_accounts e JOIN transactions t USING (transaction_id)
+         JOIN sales_agents a ON a.agent_id = t.agent_id
+        WHERE t.mpesa_receipt_id = $1`,
+      [listed]
+    );
+    expect(rows[0]).toEqual({ escrow_status: 'QUARANTINED', security_hold: false, quarantine_reason: 'trust_below_threshold', rating: 0.2 });
   });
 
   it('(b1) a C2B confirmation with a different BillRefNumber for a RECONCILED C2B row → attribution conflict + hold', async () => {
