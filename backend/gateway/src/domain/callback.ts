@@ -8,7 +8,7 @@
  * with String() and amounts are handled in integer cents.
  */
 
-import { keyedHash, KEYED_HASH_RE } from '../config/pii';
+import { alternateKeyedHashes, keyedHash, keyedHashMatches, KEYED_HASH_RE } from '../config/pii';
 
 export type SourceChannel = 'DARAJA_STK' | 'C2B';
 
@@ -57,6 +57,16 @@ export function parseDarajaTime(value: unknown): Date | null {
   return new Date(local.getTime() - EAT_OFFSET_HOURS * 3_600_000);
 }
 
+/** Date → Daraja `yyyyMMddHHmmss` in EAT (STK Push Timestamp / Password). */
+export function formatDarajaTime(date: Date): string {
+  const eat = new Date(date.getTime() + EAT_OFFSET_HOURS * 3_600_000);
+  const p = (n: number, w = 2) => String(n).padStart(w, '0');
+  return (
+    p(eat.getUTCFullYear(), 4) + p(eat.getUTCMonth() + 1) + p(eat.getUTCDate()) +
+    p(eat.getUTCHours()) + p(eat.getUTCMinutes()) + p(eat.getUTCSeconds())
+  );
+}
+
 /** Daraja time may run ahead of our clock by at most this much before it is distrusted. */
 export const MAX_PAYMENT_TIME_SKEW_MS = 5 * 60_000;
 
@@ -79,7 +89,14 @@ export function normaliseAgentCode(value: unknown): string | null {
 
 export type Ingress =
   | { kind: 'ok'; receipt: string; amountCents: number; channel: SourceChannel }
-  | { kind: 'drop'; reason: string };
+  | { kind: 'drop'; reason: string; stkFailure?: StkFailure };
+
+/** A completed-but-unsuccessful STK push (ResultCode != 0: 1032 cancelled, 1037 timeout, ...). */
+export interface StkFailure {
+  checkoutRequestId: string;
+  resultCode: string;
+  resultDesc: string;
+}
 
 function stkItems(stk: any): Array<{ Name?: unknown; Value?: unknown }> {
   const items = stk?.CallbackMetadata?.Item;
@@ -97,7 +114,18 @@ export function extractIngress(body: any): Ingress {
 
   if (body?.Body?.stkCallback) {
     const stk = body.Body.stkCallback;
-    if (str(stk.ResultCode) !== '0') return { kind: 'drop', reason: `stk_result_${str(stk.ResultCode) || 'missing'}` };
+    if (str(stk.ResultCode) !== '0') {
+      const resultCode = str(stk.ResultCode);
+      const checkoutRequestId = str(stk.CheckoutRequestID);
+      return {
+        kind: 'drop',
+        reason: `stk_result_${resultCode || 'missing'}`,
+        stkFailure:
+          resultCode && checkoutRequestId && checkoutRequestId.length <= 100
+            ? { checkoutRequestId, resultCode: resultCode.slice(0, 20), resultDesc: str(stk.ResultDesc).slice(0, 200) }
+            : undefined,
+      };
+    }
     const items = stkItems(stk);
     receipt = str(itemValue(items, 'MpesaReceiptNumber'));
     rawAmount = itemValue(items, 'Amount');
@@ -118,24 +146,47 @@ export function extractIngress(body: any): Ingress {
 // ── Counterparty & redaction ──────────────────────────────────────────────
 
 /**
+ * A Kenyan mobile number in Daraja's format (2547XXXXXXXX / 2541XXXXXXXX), or null.
+ * Accepts 07.. / 01.., 7.. / 1.., 2547.. / 2541.., with or without "+", spaces, dashes.
+ */
+export function normaliseKenyanMsisdn(raw: unknown): string | null {
+  const digits = str(raw).replace(/[\s+()-]/g, '');
+  if (/^254[17]\d{8}$/.test(digits)) return digits;
+  if (/^0[17]\d{8}$/.test(digits)) return `254${digits.slice(1)}`;
+  if (/^[17]\d{8}$/.test(digits)) return `254${digits}`;
+  return null;
+}
+
+/** Counterparty HMAC of an already-normalised MSISDN (same value msisdnHash produces). */
+export const normalisedMsisdnHash = (msisdn: string): string => keyedHash('counterparty', `msisdn:${msisdn}`);
+
+/** True when `stored` is the counterparty HMAC of `msisdn` under any configured key (rotation-safe). */
+export const msisdnHashMatches = (stored: string, msisdn: string): boolean =>
+  keyedHashMatches(stored, 'counterparty', `msisdn:${msisdn}`) === true;
+
+/**
  * Keyed hash of a raw MSISDN-like value, or null when absent/masked.
  *  - masked values ("2547***149") are treated as absent;
  *  - a provider-hashed MSISDN (hex digest) is HMAC'd as-is;
  *  - phone numbers are normalised to 2547XXXXXXXX / 2541XXXXXXXX first.
  */
 export function msisdnHash(raw: unknown): string | null {
+  const input = msisdnHashInput(raw);
+  return input === null ? null : keyedHash('counterparty', input);
+}
+
+/** The string msisdnHash() MACs, or null when absent/masked/not a phone. */
+function msisdnHashInput(raw: unknown): string | null {
   const value = str(raw);
   // Masked ("2547*****149", "2547XXXXX149") falls through to null below; "*" is decisive.
   if (!value || /[*•]/.test(value)) return null;
-  if (/^[0-9a-fA-F]{32,128}$/.test(value) && /[a-fA-F]/.test(value)) {
-    return keyedHash('counterparty', `provider:${value.toLowerCase()}`);
-  }
+  if (/^[0-9a-fA-F]{32,128}$/.test(value) && /[a-fA-F]/.test(value)) return `provider:${value.toLowerCase()}`;
   const digits = value.replace(/[\s+()-]/g, '');
   if (!/^\d{9,15}$/.test(digits)) return null;
   let normalised = digits;
   if (/^0[17]\d{8}$/.test(digits)) normalised = `254${digits.slice(1)}`;
   else if (/^[17]\d{8}$/.test(digits)) normalised = `254${digits}`;
-  return keyedHash('counterparty', `msisdn:${normalised}`);
+  return `msisdn:${normalised}`;
 }
 
 /** Counterparty when the payer MSISDN is absent: unique per receipt, so it never fakes reuse. */
@@ -177,9 +228,23 @@ function redactNode(node: any): any {
   return out;
 }
 
-/** Deep copy of the body with MSISDNs replaced by their HMAC and payer names removed. */
+/** Stored next to an STK callback's PhoneNumber hash: the same MSISDN under the previous PII key. */
+export const STK_PHONE_ALT_FIELD = 'PhoneNumberAltHashes';
+
+/**
+ * Deep copy of the body with MSISDNs replaced by their HMAC and payer names removed.
+ * During a PII key rotation an STK callback also keeps its PhoneNumber's HMAC under the previous
+ * key, so the STK fallback match can still pair it with a request hashed before the rotation.
+ */
 export function redactPayload(body: unknown): unknown {
-  return redactNode(body);
+  const out = redactNode(body);
+  const stk = (body as any)?.Body?.stkCallback;
+  if (stk && typeof stk === 'object' && out?.Body?.stkCallback) {
+    const input = msisdnHashInput(itemValue(stkItems(stk), 'PhoneNumber'));
+    const alt = input === null ? [] : alternateKeyedHashes('counterparty', input);
+    if (alt.length > 0) out.Body.stkCallback[STK_PHONE_ALT_FIELD] = alt;
+  }
+  return out;
 }
 
 // ── Worker-side parser (stored, redacted payload) ─────────────────────────
@@ -192,6 +257,8 @@ export interface ParsedCallback {
   paymentTime: Date | null;
   /** Keyed MSISDN hash from the redacted payload, or null when absent/masked. */
   counterpartyHash: string | null;
+  /** The same MSISDN's hash under the previous PII key (STK, during a rotation only). */
+  counterpartyAltHashes: string[];
   checkoutRequestId: string | null;
   billRefNumber: string | null;
 }
@@ -212,6 +279,9 @@ export function parseStoredCallback(payload: unknown): ParsedCallback {
       channel: ingress.channel,
       paymentTime: parseDarajaTime(itemValue(items, 'TransactionDate')),
       counterpartyHash: keyed(itemValue(items, 'PhoneNumber')),
+      counterpartyAltHashes: Array.isArray(stk[STK_PHONE_ALT_FIELD])
+        ? stk[STK_PHONE_ALT_FIELD].map(keyed).filter((h: string | null): h is string => h !== null)
+        : [],
       checkoutRequestId: str(stk.CheckoutRequestID) || null,
       billRefNumber: null,
     };
@@ -222,6 +292,7 @@ export function parseStoredCallback(payload: unknown): ParsedCallback {
     channel: ingress.channel,
     paymentTime: parseDarajaTime(body.TransTime),
     counterpartyHash: keyed(body.MSISDN),
+    counterpartyAltHashes: [],
     checkoutRequestId: null,
     billRefNumber: str(body.BillRefNumber) || null,
   };

@@ -5,8 +5,10 @@
  * Architectural role (BMAD / Thesis Ch. 3):
  *   The Upstream Ingestion Gateway receives Safaricom Daraja webhooks,
  *   applies security hardening, and routes traffic to the webhook controller.
- *   It also exposes a /health endpoint reporting Redis, Postgres, and
- *   Circuit Breaker status for operational observability.
+ *   Agents authenticate with phone + PIN (RS256 access tokens, rotating refresh
+ *   cookies — /api/v1/auth) and trigger STK Pushes (/api/v1/payments/stk).
+ *   Health: /health/live and /health/ready are minimal unauthenticated probes;
+ *   /health/details (MERCHANT_ADMIN) reports queue, ML, login, STK and Daraja metrics.
  *
  * Settlement happens in background workers draining the durable intake queue
  * (settlement worker) and self-healing fail-safe quarantines (re-score worker).
@@ -15,6 +17,7 @@
  */
 
 import 'dotenv/config'; // must run before any module reads process.env
+import crypto from 'crypto';
 import express, { Request, Response, NextFunction } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
@@ -24,9 +27,16 @@ import { v4 as uuidv4 } from 'uuid';
 import { redisClient, isRedisHealthy, shutdownRedis } from './config/redis';
 import pool, { isDbHealthy, shutdownDb } from './config/db';
 import { assertPiiKey } from './config/pii';
+import { loadJwtKeyring } from './config/jwt';
+import { darajaConfig } from './daraja/client';
+import { corsOrigins, publicOrigin, requireAuth } from './auth/middleware';
+import type { Db } from './repositories/db.types';
 
 // ── Routes ────────────────────────────────────────────────────────────
 import webhookRoutes from './routes/webhook.routes';
+import { createAuthRouter } from './routes/auth.routes';
+import { createPaymentsRouter, stkEnabled } from './routes/payments.routes';
+import { metrics } from './services/metrics.service';
 
 // ── Services (for health endpoint and shutdown) ───────────────────────
 import { resilientRiskClient } from './services/risk_client.service';
@@ -65,12 +75,15 @@ let server: ReturnType<typeof app.listen> | undefined;
 // 1. Security headers (helmet)
 app.use(helmet());
 
-// 2. CORS — configurable origin (defaults to permissive in dev)
+// 2. CORS — credentialed allowlist (CORS_ORIGINS, exact origins). Same-site deployment is required
+//    for the SameSite=Strict refresh cookie; anything not listed gets no CORS headers.
 app.use(
   cors({
-    origin: process.env.CORS_ORIGIN || '*',
+    origin: (origin, cb) => cb(null, origin !== undefined && corsOrigins().includes(origin) ? origin : false),
+    credentials: true,
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization'],
+    allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'Idempotency-Key'],
+    exposedHeaders: ['Retry-After', 'X-Request-ID'],
   })
 );
 
@@ -88,7 +101,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   res.on('finish', () => {
     const ms = Date.now() - start;
     // Log the route pattern, not the URL: the callback URL carries a secret token.
-    const path = redactPath(req.route?.path ?? req.path);
+    const path = redactPath(req.route ? `${req.baseUrl}${req.route.path}` : req.path);
     console.info(
       `[HTTP] ${req.method} ${path} ${res.statusCode} — ${ms}ms — ReqID: ${(req as any).reqId}`
     );
@@ -108,13 +121,38 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 // 6. Mount webhook routes (these apply their own JSON body parser with rawBody capture)
 app.use('/', webhookRoutes);
 
-// ── Health Check Endpoint ─────────────────────────────────────────────
+// 7. Agent authentication and STK Push initiation (each router parses its own small JSON bodies)
+app.use('/api/v1/auth', createAuthRouter());
+app.use('/api/v1/payments', createPaymentsRouter());
+
+// ── Health Check Endpoints ────────────────────────────────────────────
+/** GET /health/live — the process is up. No dependencies, no metrics. */
+app.get('/health/live', (_req: Request, res: Response) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+/** GET /health/ready — Redis and Postgres reachable (container HEALTHCHECK). No metrics. */
+app.get('/health/ready', async (_req: Request, res: Response) => {
+  const [redisOk, dbOk] = await Promise.all([isRedisHealthy(), isDbHealthy()]).catch(() => [false, false]);
+  const ready = redisOk && dbOk && !isShuttingDown;
+  res.status(ready ? 200 : 503).json({ status: ready ? 'ok' : 'degraded' });
+});
+
 /**
- * GET /health
- * Reports aggregated infrastructure health for container orchestrators.
- * Returns 200 if all dependencies are reachable, 503 if degraded.
+ * GET /health/details (MERCHANT_ADMIN) — aggregated infrastructure health plus queue, ML, login,
+ * STK-outcome and Daraja-latency metrics. 200 if Redis and Postgres are reachable, else 503.
  */
-app.get('/health', async (_req: Request, res: Response) => {
+/** A monitoring scraper may present X-Metrics-Token = HEALTH_METRICS_TOKEN (constant-time compare). */
+export function metricsTokenValid(given: string | undefined, expected: string | undefined = process.env.HEALTH_METRICS_TOKEN): boolean {
+  if (!expected || !given) return false;
+  const h = (v: string) => crypto.createHash('sha256').update(v).digest();
+  return crypto.timingSafeEqual(h(given), h(expected));
+}
+const adminOnly = requireAuth(['MERCHANT_ADMIN']);
+const detailsAuth = (req: Request, res: Response, next: NextFunction) =>
+  metricsTokenValid(req.get('X-Metrics-Token')) ? next() : adminOnly(req, res, next);
+
+app.get('/health/details', detailsAuth, async (_req: Request, res: Response) => {
   try {
     const [redisOk, dbOk] = await Promise.all([isRedisHealthy(), isDbHealthy()]);
     const circuitBreaker = resilientRiskClient.getCircuitState();
@@ -138,6 +176,9 @@ app.get('/health', async (_req: Request, res: Response) => {
       stalledQuarantines: quarantine?.stalledQuarantines ?? null,
       spoolDepth,
       workers: { settlement: settlementWorker.isRunning(), rescore: rescoreWorker.isRunning() },
+      ...metrics.snapshot(),
+      countersScope: 'per-process', // login / STK / Daraja counters reset on restart and are not summed across replicas
+      stkEnabled: stkEnabled(),
       uptime: process.uptime(),
     });
   } catch (err) {
@@ -197,27 +238,57 @@ process.on('uncaughtException', (err) => {
 });
 
 // ── Start Listener ────────────────────────────────────────────────────
-const REQUIRED_MIGRATION = '001_settlement_pipeline';
+export const REQUIRED_MIGRATION = '002_auth_stk_initiation';
 
-async function startup(): Promise<void> {
+/**
+ * Startup gates, without side effects: `fatal` problems refuse the start, `warnings` are logged.
+ * Secrets, the JWT key ring, Daraja (when STK_ENABLED), the callback token, the schema version.
+ */
+export async function preflight(env: NodeJS.ProcessEnv, db: Db): Promise<{ fatal: string[]; warnings: string[] }> {
+  const fatal: string[] = [];
+  const warnings: string[] = [];
+  const gate = (fn: () => unknown) => {
+    try {
+      fn();
+    } catch (error) {
+      fatal.push((error as Error).message);
+    }
+  };
+  gate(() => assertPiiKey(env)); // PII_HMAC_KEY >= 32 bytes: every stored hash depends on it
+  gate(() => loadJwtKeyring(env)); // RS256 key ring, >= 2048-bit RSA: every access token depends on it
+  if (stkEnabled(env)) gate(() => darajaConfig(env)); // STK initiation needs the Daraja credentials
+  if (!env.MPESA_CALLBACK_TOKEN) fatal.push('MPESA_CALLBACK_TOKEN is not set (every Daraja callback would be rejected)');
   try {
-    assertPiiKey(); // PII_HMAC_KEY >= 32 bytes: every stored hash depends on it
-  } catch (error) {
-    console.error(`[Startup] ${(error as Error).message} — refusing to start.`);
-    process.exit(1);
-  }
-  if (!process.env.MPESA_CALLBACK_TOKEN) {
-    console.error('[Startup] MPESA_CALLBACK_TOKEN is not set (every Daraja callback would be rejected) — refusing to start.');
-    process.exit(1);
-  }
-  try {
-    const { rows } = await pool.query('SELECT 1 FROM schema_migrations WHERE version = $1', [REQUIRED_MIGRATION]);
+    const { rows } = await db.query('SELECT 1 FROM schema_migrations WHERE version = $1', [REQUIRED_MIGRATION]);
     if (rows.length === 0) throw new Error(`migration ${REQUIRED_MIGRATION} is not recorded`);
   } catch (error) {
-    console.error(
-      `[Startup] Database schema is not migrated (${(error as Error).message}). Apply ` +
-        `infra/scripts/migrations/${REQUIRED_MIGRATION}.sql (or init_db.sql on a fresh database) — refusing to start.`
+    fatal.push(
+      `Database schema is not migrated (${(error as Error).message}). Apply the infra/scripts/migrations/*.sql ` +
+        `in order, up to ${REQUIRED_MIGRATION} (or init_db.sql on a fresh database)`
     );
+  }
+  if (env.AUTH_COOKIE_INSECURE_DEV === 'true') {
+    warnings.push(
+      env.NODE_ENV === 'production'
+        ? 'AUTH_COOKIE_INSECURE_DEV is ignored in production.'
+        : 'AUTH_COOKIE_INSECURE_DEV=true: auth cookies are not Secure (plain-HTTP development only).'
+    );
+  }
+  if (env.NODE_ENV === 'production' && !env.TRUST_PROXY?.trim() && !publicOrigin(env)) {
+    warnings.push(
+      'neither TRUST_PROXY nor PUBLIC_ORIGIN is set: behind a proxy every login shares the proxy IP for throttling, ' +
+        'and same-origin refresh/logout may fail the Origin check'
+    );
+  }
+  return { fatal, warnings };
+}
+
+async function startup(): Promise<void> {
+  const { fatal, warnings } = await preflight(process.env, pool);
+  for (const w of warnings) console.warn(`[Startup] ${w}`);
+  if (fatal.length > 0) {
+    for (const f of fatal) console.error(`[Startup] ${f}`);
+    console.error('[Startup] refusing to start.');
     process.exit(1);
   }
 

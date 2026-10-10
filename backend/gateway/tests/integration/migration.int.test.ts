@@ -1,10 +1,10 @@
 /**
- * Migration 001 against real Postgres: legacy schema + migration == fresh init schema,
+ * Migrations 001 + 002 against real Postgres: legacy schema + 001 + 002 == fresh init schema,
  * legacy rows are backfilled, and re-running (or running on a fresh install) is a no-op.
  */
 
 import type { Pool } from 'pg';
-import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, type TestDb } from './helpers';
+import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, type TestDb } from './helpers';
 
 jest.setTimeout(60_000);
 
@@ -22,7 +22,7 @@ async function shape(pool: Pool) {
   return { cols: cols.rows, idx: idx.rows, cons: consSorted };
 }
 
-describeDb('migration 001_settlement_pipeline', () => {
+describeDb('migrations 001_settlement_pipeline + 002_auth_stk_initiation', () => {
   let legacy: TestDb;
   let fresh: TestDb;
 
@@ -78,6 +78,22 @@ describeDb('migration 001_settlement_pipeline', () => {
       p.query(`INSERT INTO verification_events (transaction_id, model_version, decision) VALUES ($1, 'v', 'CLEAR')`, [t.transaction_id])
     ).rejects.toThrow(/verification_events_initial_uq/);
 
+    // A pre-002 STK request (old shape: CheckoutRequestID primary key), consumed by a receipt.
+    await p.query(
+      `INSERT INTO stk_requests (checkout_request_id, agent_id, amount, consumed_receipt) VALUES ('ws_CO_legacy', $1, 1500, 'LEGACY0001')`,
+      [a.agent_id]
+    );
+    await p.query(MIGRATION_002);
+    const { rows: [stk] } = await p.query(`SELECT * FROM stk_requests`);
+    expect(stk).toMatchObject({ checkout_request_id: 'ws_CO_legacy', status: 'ACCEPTED', consumed_receipt: 'LEGACY0001', idempotency_key: null });
+    expect(stk.stk_request_id).toMatch(/^[0-9a-f-]{36}$/);
+    // The worker's replay guard still relies on this constraint name.
+    await expect(
+      p.query(`INSERT INTO stk_requests (agent_id, amount, status, consumed_receipt) VALUES ($1, 10, 'UNKNOWN', 'LEGACY0001')`, [a.agent_id])
+    ).rejects.toMatchObject({ constraint: 'stk_requests_consumed_receipt_key' });
+    // Subject-generic security events (no receipt).
+    await p.query(`INSERT INTO security_events (event_type, subject_user_id, detail) VALUES ('LOGIN_LOCKOUT', $1, 'x')`, [u.user_id]);
+
     const [a1, b1] = await Promise.all([shape(legacy.pool), shape(fresh.pool)]);
     expect(a1.cols).toEqual(b1.cols);
     expect(a1.idx).toEqual(b1.idx);
@@ -87,13 +103,15 @@ describeDb('migration 001_settlement_pipeline', () => {
   it('is a no-op when re-run, and on a fresh install', async () => {
     const before = await shape(legacy.pool);
     await legacy.pool.query(MIGRATION_001);
+    await legacy.pool.query(MIGRATION_002);
     expect(await shape(legacy.pool)).toEqual(before);
 
     const freshBefore = await shape(fresh.pool);
     await fresh.pool.query(MIGRATION_001);
+    await fresh.pool.query(MIGRATION_002);
     expect(await shape(fresh.pool)).toEqual(freshBefore);
-    const { rows } = await fresh.pool.query(`SELECT version FROM schema_migrations`);
-    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline']);
+    const { rows } = await fresh.pool.query(`SELECT version FROM schema_migrations ORDER BY version`);
+    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation']);
   });
 
   it('enforces the agent_code CHECK (upper-case, trimmed)', async () => {
@@ -104,6 +122,27 @@ describeDb('migration 001_settlement_pipeline', () => {
       p.query(`INSERT INTO sales_agents (user_id, outlet_id, agent_code) VALUES ($1, $2, ' ag042 ')`, [u.user_id, o.outlet_id])
     ).rejects.toThrow(/sales_agents_agent_code_normalised/);
     await p.query(`INSERT INTO sales_agents (user_id, outlet_id, agent_code) VALUES ($1, $2, 'AG042')`, [u.user_id, o.outlet_id]);
+  });
+
+  it('enforces the agent_code length (Daraja AccountReference <= 12); 002 refuses longer legacy codes', async () => {
+    const p = fresh.pool;
+    const { rows: [u] } = await p.query(`INSERT INTO users (full_name, phone_number, role) VALUES ('a', '254700000010', 'SALES_AGENT') RETURNING user_id`);
+    const { rows: [o] } = await p.query(`INSERT INTO retail_outlets (outlet_code, region, monthly_baseline) VALUES ('O10', 'r', 1) RETURNING outlet_id`);
+    await expect(
+      p.query(`INSERT INTO sales_agents (user_id, outlet_id, agent_code) VALUES ($1, $2, 'ABCDEFGHIJKLM')`, [u.user_id, o.outlet_id])
+    ).rejects.toThrow(/sales_agents_agent_code_length/);
+
+    const long = await createTestDb('sm_mig_long');
+    try {
+      await long.pool.query(LEGACY_SQL);
+      await long.pool.query(MIGRATION_001);
+      const { rows: [u2] } = await long.pool.query(`INSERT INTO users (full_name, phone_number, role) VALUES ('a', '254700000011', 'SALES_AGENT') RETURNING user_id`);
+      const { rows: [o2] } = await long.pool.query(`INSERT INTO retail_outlets (outlet_code, region, monthly_baseline) VALUES ('O11', 'r', 1) RETURNING outlet_id`);
+      await long.pool.query(`INSERT INTO sales_agents (user_id, outlet_id, agent_code) VALUES ($1, $2, 'ABCDEFGHIJKLM')`, [u2.user_id, o2.outlet_id]);
+      await expect(long.pool.query(MIGRATION_002)).rejects.toThrow(/longer than 12 characters.*ABCDEFGHIJKLM/);
+    } finally {
+      await long.drop();
+    }
   });
 
   it('aborts with the duplicated transaction_ids when legacy escrows are duplicated; honours salesmesh.legacy_tz', async () => {

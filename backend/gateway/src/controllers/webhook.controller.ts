@@ -12,7 +12,11 @@
  *            down or slow, the gateway answers 503 so Daraja retries, and spools the redacted
  *            payload to Redis as a safety net.
  *   Sec 2.2.3 — Keyed hash of the raw bytes as received, stored for tamper-evidence;
- *            a mutated retry raises a persisted security alarm and keeps the original.
+ *            a mutated retry raises a persisted security alarm and keeps the original. The
+ *            same receipt and amount on the other channel (STK callback + C2B confirmation of
+ *            one payment) is recorded as a cross-channel echo instead (audit row, no hold).
+ *   gh-5   — A failed STK callback (ResultCode != 0) marks its stk_requests row FAILED with the
+ *            code (no intake row, no settlement); 503 when that cannot be recorded.
  *   Kenya DPA 2019 — payloads are redacted before storage and never logged.
  */
 
@@ -29,8 +33,10 @@ import {
   type SourceChannel,
 } from '../domain/callback';
 import { findAgentByCode } from '../repositories/agent.repository';
-import { insertIntake } from '../repositories/intake.repository';
-import { recordPayloadMutation } from '../repositories/security.repository';
+import { findIntakeSummary, insertIntake, isChannelEcho } from '../repositories/intake.repository';
+import { recordChannelEcho, recordPayloadMutation } from '../repositories/security.repository';
+import { markStkFailed } from '../repositories/stk.repository';
+import { metrics } from '../services/metrics.service';
 import { idempotencyService } from '../services/idempotency.service';
 import { spoolService } from '../services/spool.service';
 import { settlementWorker } from '../workers/settlement.worker';
@@ -84,7 +90,22 @@ class WebhookController {
     // ── STEP 1 — EXTRACT & VALIDATE ─────────────────────────────────────
     const ingress = extractIngress(body);
     if (ingress.kind === 'drop') {
-      if (ingress.reason.startsWith('stk_result_')) {
+      if (ingress.stkFailure) {
+        const f = ingress.stkFailure;
+        try {
+          const n = await withDeadline(
+            markStkFailed(hotPool, f.checkoutRequestId, f.resultCode, f.resultDesc),
+            Date.now() + HOT_PATH_TIMEOUT_MS
+          );
+          if (n > 0) metrics.stkCallbacksFailed.recorded += 1;
+          else metrics.stkCallbacksFailed.unmatched += 1;
+          console.info(`[Webhook] STK Push not completed (${ingress.reason}); ${n > 0 ? 'request marked FAILED' : 'no matching STK request'} — ACK.`);
+        } catch (error) {
+          console.error(`[Webhook] could not record the failed STK push (${(error as Error).message}) — 503.`);
+          retryLater();
+          return;
+        }
+      } else if (ingress.reason.startsWith('stk_result_')) {
         console.info(`[Webhook] STK Push not completed (${ingress.reason}) — ACK and drop.`);
       } else {
         // Malformed — ACK to prevent a retry storm; nothing here can ever settle.
@@ -93,7 +114,7 @@ class WebhookController {
       ack();
       return;
     }
-    const { receipt, channel } = ingress;
+    const { receipt, channel, amountCents } = ingress;
 
     // ── STEP 2 — KEYED HASH OF THE BYTES AS RECEIVED ────────────────────
     const rawBytes: Buffer = (req as any).rawBody ?? Buffer.from(JSON.stringify(body), 'utf-8');
@@ -121,7 +142,7 @@ class WebhookController {
         const same = samePayload(claim.storedHash, hash, rawBytes);
         if (claim.stored) {
           if (same) console.info(`[Webhook] Duplicate for receipt ${receipt} already stored — ACK.`);
-          else await this.mutation(receipt, claim.storedHash, hash, 'redis', deadline);
+          else await this.conflict(receipt, claim.storedHash, hash, { channel, amountCents }, 'redis', deadline);
           ack();
           return;
         }
@@ -134,7 +155,7 @@ class WebhookController {
         deadline
       );
       if (result.outcome === 'existing' && !samePayload(result.storedHash, hash, rawBytes)) {
-        await this.mutation(receipt, result.storedHash, hash, 'postgres', deadline);
+        await this.conflict(receipt, result.storedHash, hash, { channel, amountCents }, 'postgres', deadline);
         ack();
         return;
       }
@@ -160,6 +181,28 @@ class WebhookController {
       retryLater();
       await this.spool(receipt, hash, channel, redacted);
     }
+  }
+
+  /**
+   * Same receipt, different bytes, intake row exists: a cross-channel echo (other channel, same
+   * amount: audit row only) or a payload mutation (alarm + security hold). The original is kept.
+   */
+  private async conflict(
+    receipt: string,
+    storedHash: string,
+    incomingHash: string,
+    incoming: { channel: SourceChannel; amountCents: number },
+    source: string,
+    deadline: number
+  ): Promise<void> {
+    const stored = await withDeadline(findIntakeSummary(hotPool, receipt), deadline);
+    if (stored && isChannelEcho(stored, incoming)) {
+      console.warn(`[Webhook] Receipt ${receipt} delivered on both STK and C2B (same amount) — cross-channel echo recorded, no settlement.`);
+      const detail = `${stored.channel} intake echoed by ${incoming.channel} (${source})`;
+      await withDeadline(recordChannelEcho(hotPool, receipt, storedHash, incomingHash, detail), deadline);
+      return;
+    }
+    await this.mutation(receipt, storedHash, incomingHash, source, deadline);
   }
 
   /** Same receipt, different bytes: persist the alarm (escrow → QUARANTINED) and keep the original. */

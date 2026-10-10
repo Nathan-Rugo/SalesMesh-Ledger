@@ -12,12 +12,14 @@ jest.mock('../src/repositories/intake.repository');
 jest.mock('../src/repositories/security.repository');
 jest.mock('../src/repositories/transaction.repository');
 jest.mock('../src/repositories/escrow.repository');
+jest.mock('../src/repositories/stk.repository');
 
 import * as agents from '../src/repositories/agent.repository';
 import * as intake from '../src/repositories/intake.repository';
 import * as security from '../src/repositories/security.repository';
 import * as txns from '../src/repositories/transaction.repository';
 import * as escrowRepo from '../src/repositories/escrow.repository';
+import * as stkRepo from '../src/repositories/stk.repository';
 import { redactPayload, msisdnHash, receiptCounterpartyHash } from '../src/domain/callback';
 import { SettlementWorker } from '../src/workers/settlement.worker';
 import { RescoreWorker } from '../src/workers/rescore.worker';
@@ -125,7 +127,10 @@ beforeEach(() => {
   risk.evaluate.mockImplementation(async () => clear());
   risk.isAvailable.mockReturnValue(true);
   m(agents.findAgentByCode).mockResolvedValue('agent-42');
-  m(agents.findStkRequest).mockResolvedValue({ agentId: 'agent-stk', amountCents: 150000, consumedReceipt: null });
+  m(agents.findStkRequest).mockResolvedValue({ stkRequestId: 'stk-1', agentId: 'agent-stk', amountCents: 150000, status: 'ACCEPTED', consumedReceipt: null });
+  m(stkRepo.findFallbackCandidates).mockResolvedValue([]);
+  m(stkRepo.bindFallback).mockResolvedValue(true);
+  m(stkRepo.expireStalePending).mockResolvedValue(null);
   m(agents.consumeStkRequest).mockResolvedValue(true);
   m(intake.lockClaimed).mockResolvedValue(true);
   m(intake.markSettled).mockResolvedValue(true);
@@ -154,7 +159,7 @@ describe('agent resolution', () => {
 
   it('STK: known CheckoutRequestID with equal amount resolves the agent and consumes the record', async () => {
     expect(await worker().process(stkRow('1500.00'))).toBe('settled');
-    expect(agents.consumeStkRequest).toHaveBeenCalledWith(expect.anything(), 'ws_CO_1', 'NLJ7RT61SV');
+    expect(agents.consumeStkRequest).toHaveBeenCalledWith(expect.anything(), 'stk-1', 'NLJ7RT61SV');
     expect(fakeEscrow.persistTransaction.mock.calls[0][0]).toMatchObject({ agent_id: 'agent-stk', source_channel: 'DARAJA_STK' });
   });
 
@@ -170,7 +175,7 @@ describe('agent resolution', () => {
   });
 
   it('STK: a second receipt for a consumed request → UNRESOLVED with a persisted alarm', async () => {
-    m(agents.findStkRequest).mockResolvedValue({ agentId: 'agent-stk', amountCents: 150000, consumedReceipt: 'OTHER00001' });
+    m(agents.findStkRequest).mockResolvedValue({ stkRequestId: 'stk-1', agentId: 'agent-stk', amountCents: 150000, status: 'ACCEPTED', consumedReceipt: 'OTHER00001' });
     const err = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     expect(await worker().process(stkRow())).toBe('unresolved');
     err.mockRestore();
@@ -507,5 +512,138 @@ describe('review fixes — worker, spool, config', () => {
     } finally {
       process.env = saved;
     }
+  });
+});
+
+describe('STK fallback match (spec gh-5: CheckoutRequestID not on file)', () => {
+  const stkWithPhone = (phone: unknown, extra: Record<string, unknown> = {}): IntakeRow => ({
+    ...stkRow(1500),
+    payload: redactPayload({
+      Body: {
+        stkCallback: {
+          CheckoutRequestID: 'ws_CO_LOST',
+          ResultCode: 0,
+          ...extra,
+          CallbackMetadata: {
+            Item: [
+              { Name: 'Amount', Value: 1500 },
+              { Name: 'MpesaReceiptNumber', Value: 'NLJ7RT61SV' },
+              { Name: 'TransactionDate', Value: 20261009120000 },
+              ...(phone === undefined ? [] : [{ Name: 'PhoneNumber', Value: phone }]),
+            ],
+          },
+        },
+      },
+    }),
+  });
+  const unknown = (id: string, agentId = 'agent-u') => ({ stkRequestId: id, agentId, status: 'UNKNOWN' as const });
+
+  beforeEach(() => {
+    m(agents.findStkRequest).mockResolvedValue(null);
+  });
+
+  it('exactly one UNKNOWN candidate → bound and consumed by stk_request_id inside the settlement transaction', async () => {
+    m(stkRepo.findFallbackCandidates).mockResolvedValue([unknown('stk-u')]);
+    const info = jest.spyOn(console, 'info').mockImplementation(() => undefined);
+    expect(await worker().process(stkWithPhone(254708374149))).toBe('settled');
+    info.mockRestore();
+    const query = { phoneHashes: [msisdnHash('254708374149')], amount: '1500.00', at: new Date('2026-10-09T09:00:00.000Z') };
+    expect(stkRepo.findFallbackCandidates).toHaveBeenCalledWith(fakePool, query);
+    // Re-selected FOR UPDATE and re-counted inside the transaction (on the transaction's client).
+    const bindCall = m(stkRepo.bindFallback).mock.calls[0];
+    expect(bindCall[0]).not.toBe(fakePool);
+    expect(bindCall[1]).toEqual({ ...query, stkRequestId: 'stk-u', checkoutRequestId: 'ws_CO_LOST' });
+    expect(agents.consumeStkRequest).toHaveBeenCalledWith(expect.anything(), 'stk-u', 'NLJ7RT61SV');
+    expect(fakeEscrow.persistTransaction.mock.calls[0][0]).toMatchObject({ agent_id: 'agent-u', source_channel: 'DARAJA_STK' });
+  });
+
+  it('no payment time in the callback → the window is anchored at received_at', async () => {
+    m(stkRepo.findFallbackCandidates).mockResolvedValue([]);
+    const row = stkWithPhone(254708374149);
+    const items = (row.payload as any).Body.stkCallback.CallbackMetadata.Item;
+    items.splice(items.findIndex((i: any) => i.Name === 'TransactionDate'), 1);
+    await worker().process(row);
+    expect(m(stkRepo.findFallbackCandidates).mock.calls[0][1]).toMatchObject({ at: RECEIVED_AT });
+  });
+
+  it('0 candidates → UNRESOLVED, retrying (the existing path)', async () => {
+    m(stkRepo.findFallbackCandidates).mockResolvedValue([]);
+    expect(await worker().process(stkWithPhone(254708374149))).toBe('unresolved');
+    expect(m(intake.markUnresolved).mock.calls[0][3]).toContain('stk_unknown_checkout_request_id');
+    expect(m(intake.markUnresolved).mock.calls[0][4]).toMatchObject({ terminal: false });
+  });
+
+  it('more than one UNKNOWN candidate → UNRESOLVED for review (fail closed), nothing bound', async () => {
+    m(stkRepo.findFallbackCandidates).mockResolvedValue([unknown('stk-1', 'agent-a'), unknown('stk-2', 'agent-b')]);
+    expect(await worker().process(stkWithPhone(254708374149))).toBe('unresolved');
+    expect(m(intake.markUnresolved).mock.calls[0][3]).toContain('stk_fallback_ambiguous');
+    expect(m(intake.markUnresolved).mock.calls[0][4]).toMatchObject({ terminal: true });
+    expect(stkRepo.bindFallback).not.toHaveBeenCalled();
+    expect(fakeEscrow.persistTransaction).not.toHaveBeenCalled();
+  });
+
+  it('a PENDING candidate (Daraja call may still answer) → retry, never bind', async () => {
+    m(stkRepo.findFallbackCandidates).mockResolvedValue([unknown('stk-u'), { stkRequestId: 'stk-p', agentId: 'agent-p', status: 'PENDING' }]);
+    expect(await worker().process(stkWithPhone(254708374149))).toBe('unresolved');
+    expect(m(intake.markUnresolved).mock.calls[0][3]).toContain('stk_fallback_pending');
+    expect(m(intake.markUnresolved).mock.calls[0][4]).toMatchObject({ terminal: false });
+    expect(stkRepo.bindFallback).not.toHaveBeenCalled();
+  });
+
+  it('a stale PENDING candidate (older than the Daraja timeout + 10 s) is moved to UNKNOWN, then matched', async () => {
+    m(stkRepo.findFallbackCandidates)
+      .mockResolvedValueOnce([{ stkRequestId: 'stk-p', agentId: 'agent-p', status: 'PENDING' }])
+      .mockResolvedValueOnce([unknown('stk-p', 'agent-p')]);
+    m(stkRepo.expireStalePending).mockResolvedValueOnce({ stkRequestId: 'stk-p' } as any);
+    jest.spyOn(console, 'info').mockImplementationOnce(() => undefined);
+    expect(await worker().process(stkWithPhone(254708374149))).toBe('settled');
+    expect(m(stkRepo.expireStalePending).mock.calls[0][1]).toBe('stk-p');
+    expect(m(stkRepo.expireStalePending).mock.calls[0][2]).toBe(35_000); // 25 s overall Daraja deadline + 10 s
+  });
+
+  it.each([
+    ['masked', '2547****149'],
+    ['missing', undefined],
+  ])('%s PhoneNumber → no fallback; UNRESOLVED', async (_n, phone) => {
+    expect(await worker().process(stkWithPhone(phone))).toBe('unresolved');
+    expect(stkRepo.findFallbackCandidates).not.toHaveBeenCalled();
+    expect(m(intake.markUnresolved).mock.calls[0][3]).toContain('stk_unknown_checkout_request_id');
+  });
+
+  it('the candidate set changed under the lock → rolled back, UNRESOLVED and retried (fail closed)', async () => {
+    m(stkRepo.findFallbackCandidates).mockResolvedValue([unknown('stk-u')]);
+    m(stkRepo.bindFallback).mockResolvedValue(false);
+    jest.spyOn(console, 'info').mockImplementationOnce(() => undefined);
+    expect(await worker().process(stkWithPhone(254708374149))).toBe('unresolved');
+    expect(clientQuery).toHaveBeenCalledWith('ROLLBACK');
+    expect(fakeEscrow.persistTransaction).not.toHaveBeenCalled();
+    expect(m(intake.markUnresolved).mock.calls[0][3]).toContain('stk_fallback_contended');
+    expect(m(intake.markUnresolved).mock.calls[0][4]).toMatchObject({ terminal: false });
+  });
+
+  it('PII key rotation: the callback also carries the previous-key HMAC, so a request hashed before the rotation still matches', async () => {
+    const saved = { ...process.env };
+    try {
+      const before = msisdnHash('254708374149'); // the request's phone_hash, made under k1
+      process.env.PII_HMAC_KEY_PREVIOUS = process.env.PII_HMAC_KEY;
+      process.env.PII_HMAC_KEY_PREVIOUS_ID = 'k1';
+      process.env.PII_HMAC_KEY = 'rotated-key-for-tests-0123456789abcdef!!';
+      process.env.PII_HMAC_KEY_ID = 'k2';
+      m(stkRepo.findFallbackCandidates).mockResolvedValue([]);
+      await worker().process(stkWithPhone(254708374149)); // intake (redaction) after the rotation
+      const hashes = m(stkRepo.findFallbackCandidates).mock.calls[0][1].phoneHashes;
+      expect(hashes).toHaveLength(2);
+      expect(hashes[0]).toMatch(/^k2:/);
+      expect(hashes).toContain(before);
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it('a paid callback for a request recorded REJECTED / FAILED → UNRESOLVED for review (status conflict)', async () => {
+    m(agents.findStkRequest).mockResolvedValue({ stkRequestId: 'stk-1', agentId: 'agent-stk', amountCents: 150000, status: 'FAILED', consumedReceipt: null });
+    expect(await worker().process(stkRow(1500))).toBe('unresolved');
+    expect(m(intake.markUnresolved).mock.calls[0][3]).toContain('stk_status_conflict_failed');
+    expect(m(intake.markUnresolved).mock.calls[0][4]).toMatchObject({ terminal: true });
   });
 });

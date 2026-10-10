@@ -11,7 +11,12 @@
     "lint": "eslint src/ --ext .ts",
     "typecheck": "tsc --noEmit",
     "test:integration": "jest --config jest.config.js --runInBand tests/integration",
-    "requeue": "node dist/scripts/requeue.js"
+    "requeue": "node dist/scripts/requeue.js",
+    "user:create": "node dist/scripts/user-create.js",
+    "user:unlock": "node dist/scripts/user-unlock.js",
+    "user:disable": "node dist/scripts/user-admin.js disable",
+    "user:reset-pin": "node dist/scripts/user-admin.js reset-pin",
+    "keys:generate": "node dist/scripts/keys-generate.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -19,6 +24,7 @@
     "express": "^4.21.0",
     "helmet": "^8.0.0",
     "ioredis": "^5.4.0",
+    "jose": "^5.10.0",
     "pg": "^8.13.0",
     "uuid": "^10.0.0"
   },

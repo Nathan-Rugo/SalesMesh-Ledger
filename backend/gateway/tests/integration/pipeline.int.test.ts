@@ -285,7 +285,7 @@ describeDb('settlement pipeline (real Postgres)', () => {
   it('STK: resolves via stk_requests, and a second receipt for the same request is held UNRESOLVED with an alarm', async () => {
     const agentId = await seedAgent(db.pool, null);
     mlStub(() => ({ decision: 'CLEAR' }));
-    await db.pool.query(`INSERT INTO stk_requests (checkout_request_id, agent_id, amount) VALUES ('ws_CO_1', $1, 1500)`, [agentId]);
+    await db.pool.query(`INSERT INTO stk_requests (checkout_request_id, agent_id, amount, status) VALUES ('ws_CO_1', $1, 1500, 'ACCEPTED')`, [agentId]);
     const stk = (receipt: string, amount: unknown) => {
       const body = {
         Body: { stkCallback: { CheckoutRequestID: 'ws_CO_1', ResultCode: 0, CallbackMetadata: { Item: [
@@ -420,5 +420,44 @@ describeDb('settlement pipeline (real Postgres)', () => {
     expect(capped.truncated).toBe(true);
     const none = await fetchHistory(db.pool, { agentId: other, at: new Date('2020-01-01Z'), excludeReceipt: 'X', limit: 2000 });
     expect(none.rows).toEqual([]);
+  });
+
+  it('spool drain: a C2B confirmation echoing a settled STK payment (same receipt + amount) → STK_CHANNEL_ECHO, no security hold', async () => {
+    const agentId = await seedAgent(db.pool, 'AGE01');
+    mlStub(() => ({ decision: 'CLEAR' }));
+    await db.pool.query(
+      `INSERT INTO stk_requests (checkout_request_id, agent_id, amount, status) VALUES ('ws_CO_ECHO', $1, 500, 'ACCEPTED')`,
+      [agentId]
+    );
+    const stkBody = {
+      Body: { stkCallback: { CheckoutRequestID: 'ws_CO_ECHO', ResultCode: 0, CallbackMetadata: { Item: [
+        { Name: 'Amount', Value: 500 },
+        { Name: 'MpesaReceiptNumber', Value: 'ECHO000009' },
+        { Name: 'TransactionDate', Value: 20261001120000 },
+        { Name: 'PhoneNumber', Value: 254708374149 },
+      ] } } },
+    };
+    await insertIntake(db.pool, {
+      receipt: 'ECHO000009',
+      hash: idempotencyService.hashPayload(Buffer.from(JSON.stringify(stkBody))),
+      channel: 'DARAJA_STK',
+      payload: redactPayload(stkBody),
+    });
+    const w = new SettlementWorker({ pool: db.pool, riskClient: new ResilientRiskClient(), spool: null, config: {} });
+    await drain(w);
+    expect((await db.pool.query(`SELECT escrow_status, security_hold FROM escrow_accounts`)).rows).toEqual([{ escrow_status: 'HELD', security_hold: false }]);
+
+    // Postgres was down when the C2B confirmation of the same payment arrived: it was spooled.
+    const { body, raw } = c2b('ECHO000009', 'AGE01', { amount: '500.00' });
+    const list = [JSON.stringify({ receipt: 'ECHO000009', hash: idempotencyService.hashPayload(raw), channel: 'C2B', payload: redactPayload(body), receivedAt: '2026-10-09T09:00:05.000Z' })];
+    const spool = { peek: async (n: number) => list.slice(0, n), remove: async (r: string) => void list.splice(list.indexOf(r), 1) };
+    const drainer = new SettlementWorker({ pool: db.pool, riskClient: new ResilientRiskClient(), spool, config: {} });
+    expect(await drainer.drainSpool()).toBe(1);
+    expect(list).toEqual([]);
+
+    const { rows: events } = await db.pool.query(`SELECT event_type, mpesa_receipt_id FROM security_events`);
+    expect(events).toEqual([{ event_type: 'STK_CHANNEL_ECHO', mpesa_receipt_id: 'ECHO000009' }]);
+    expect((await db.pool.query(`SELECT escrow_status, security_hold FROM escrow_accounts`)).rows).toEqual([{ escrow_status: 'HELD', security_hold: false }]);
+    expect(await count(db.pool, `SELECT count(*) AS n FROM mpesa_callbacks`)).toBe(1); // nothing new to settle
   });
 });

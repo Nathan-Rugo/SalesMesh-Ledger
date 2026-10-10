@@ -14,7 +14,14 @@
 
 import crypto from 'crypto';
 
-export type HashDomain = 'payload' | 'counterparty';
+/**
+ * Domains keep hashes of the same input unlinkable across uses:
+ *  - payload / counterparty: callback tamper-evidence and the payer MSISDN (spec gh-6);
+ *  - auth: login throttle keys and audit rows (phone, user agent);
+ *  - device: the trusted-device cookie MAC;
+ *  - stk_fingerprint: the STK idempotency fingerprint (phone, amount).
+ */
+export type HashDomain = 'payload' | 'counterparty' | 'auth' | 'device' | 'stk_fingerprint';
 
 interface KeyMaterial {
   id: string;
@@ -79,8 +86,9 @@ function keyring(): Keyring {
 }
 
 /** Throws PiiKeyError when the key is missing or too short. Called at startup. */
-export function assertPiiKey(): void {
-  keyring();
+export function assertPiiKey(env: NodeJS.ProcessEnv = process.env): void {
+  if (env === process.env) keyring();
+  else loadKeyring(env);
 }
 
 function hmacWith(material: KeyMaterial, domain: HashDomain, data: Buffer | string): string {
@@ -94,6 +102,15 @@ function hmacWith(material: KeyMaterial, domain: HashDomain, data: Buffer | stri
 /** Keyed, domain-separated hash under the current key: "k1:<64 hex>". */
 export function keyedHash(domain: HashDomain, data: Buffer | string): string {
   return hmacWith(keyring().current, domain, data);
+}
+
+/**
+ * The same keyed hash under every *other* configured key (the previous key, during a rotation).
+ * Lets a hash made before a rotation be matched to one made after it, by plain equality.
+ */
+export function alternateKeyedHashes(domain: HashDomain, data: Buffer | string): string[] {
+  const ring = keyring();
+  return ring.previous ? [hmacWith(ring.previous, domain, data)] : [];
 }
 
 /**

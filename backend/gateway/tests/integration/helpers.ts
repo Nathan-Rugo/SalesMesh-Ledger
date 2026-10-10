@@ -20,6 +20,10 @@ export const MIGRATION_001 = fs.readFileSync(
   path.join(REPO_ROOT, 'infra', 'scripts', 'migrations', '001_settlement_pipeline.sql'),
   'utf-8'
 );
+export const MIGRATION_002 = fs.readFileSync(
+  path.join(REPO_ROOT, 'infra', 'scripts', 'migrations', '002_auth_stk_initiation.sql'),
+  'utf-8'
+);
 export const LEGACY_SQL = fs.readFileSync(path.join(__dirname, 'fixtures', 'legacy_init_db.sql'), 'utf-8');
 
 function urlFor(db: string): string {

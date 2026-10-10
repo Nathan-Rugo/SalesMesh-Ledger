@@ -40,7 +40,10 @@ jest.mock('ioredis', () =>
       }),
       llen: jest.fn(async (key: string) => (mockRedisLists.get(key) ?? []).length),
       del: jest.fn(),
-      ping: jest.fn(async () => 'PONG'),
+      ping: jest.fn(async () => {
+        guard();
+        return 'PONG';
+      }),
       quit: jest.fn(),
       connect: jest.fn(async () => {}),
       on: jest.fn(),
@@ -49,6 +52,7 @@ jest.mock('ioredis', () =>
 );
 
 const mockIntake = new Map<string, string>();
+const mockIntakeMeta = new Map<string, { channel: string; payload: unknown }>();
 const mockAgents = new Map<string, string>([['AG042', 'agent-uuid-42']]);
 const mockPg = { down: false, delayMs: 0 };
 const mockPgQuery = jest.fn(async (text: string, values: any[] = []): Promise<any> => {
@@ -57,11 +61,16 @@ const mockPgQuery = jest.fn(async (text: string, values: any[] = []): Promise<an
   if (/INSERT INTO mpesa_callbacks/.test(text)) {
     if (mockIntake.has(values[0])) return { rows: [], rowCount: 0 };
     mockIntake.set(values[0], values[1]);
+    mockIntakeMeta.set(values[0], { channel: values[2], payload: JSON.parse(values[3]) });
     return { rows: [{ callback_id: `cb-${values[0]}` }], rowCount: 1 };
   }
   if (/SELECT raw_payload_hash FROM mpesa_callbacks/.test(text)) {
     const h = mockIntake.get(values[0]);
     return { rows: h ? [{ raw_payload_hash: h }] : [], rowCount: h ? 1 : 0 };
+  }
+  if (/SELECT source_channel, payload FROM mpesa_callbacks/.test(text)) {
+    const meta = mockIntakeMeta.get(values[0]);
+    return { rows: meta ? [{ source_channel: meta.channel, payload: meta.payload }] : [], rowCount: meta ? 1 : 0 };
   }
   if (/FROM sales_agents WHERE agent_code/.test(text)) {
     const id = mockAgents.get(values[0]);
@@ -92,6 +101,7 @@ import { SPOOL_KEY } from '../src/services/spool.service';
 import { msisdnHash } from '../src/domain/callback';
 import { settlementWorker } from '../src/workers/settlement.worker';
 import { parseTrustProxy, redactPath } from '../src/index';
+import { signAccessToken } from '../src/auth/tokens';
 
 let server: http.Server;
 let port = 0;
@@ -154,6 +164,7 @@ beforeEach(() => {
   mockRedisStore.clear();
   mockRedisLists.clear();
   mockIntake.clear();
+  mockIntakeMeta.clear();
   mockRedis.down = false;
   mockPg.down = false;
   mockPg.delayMs = 0;
@@ -339,7 +350,46 @@ describe('forgery defences', () => {
   });
 });
 
-describe('/health observability', () => {
+function getJson(path: string, token?: string): Promise<{ status: number; body: any }> {
+  return new Promise((resolve, reject) => {
+    http
+      .get({ hostname: '127.0.0.1', port, path, headers: token ? { Authorization: `Bearer ${token}` } : {} }, (r) => {
+        let b = '';
+        r.on('data', (c) => (b += c));
+        r.on('end', () => {
+          let body: any = b;
+          try {
+            body = b ? JSON.parse(b) : null;
+          } catch {
+            /* not JSON (e.g. the default 404 page) */
+          }
+          resolve({ status: r.statusCode!, body });
+        });
+      })
+      .on('error', reject);
+  });
+}
+const tokenFor = async (role: 'MERCHANT_ADMIN' | 'SALES_AGENT') =>
+  (await signAccessToken({ userId: '0b0b0b0b-1111-4222-8333-444455556666', role, pinChangeRequired: false })).token;
+
+describe('/health probes (split: live / ready / details)', () => {
+  it('/health/live and /health/ready are unauthenticated and expose no metrics', async () => {
+    const live = await getJson('/health/live');
+    expect(live).toEqual({ status: 200, body: { status: 'ok' } });
+    const ready = await getJson('/health/ready');
+    expect(ready).toEqual({ status: 200, body: { status: 'ok' } });
+    expect((await getJson('/health')).status).toBe(404);
+  });
+
+  it('/health/details requires a MERCHANT_ADMIN access token', async () => {
+    expect((await getJson('/health/details')).status).toBe(401);
+    expect((await getJson('/health/details', 'not.a.jwt')).status).toBe(401);
+    const agent = await getJson('/health/details', await tokenFor('SALES_AGENT'));
+    expect(agent).toEqual({ status: 403, body: { error: 'forbidden' } });
+  });
+});
+
+describe('/health/details observability', () => {
   let afterThis: () => void = () => undefined;
   afterEach(() => afterThis());
 
@@ -353,13 +403,7 @@ describe('/health observability', () => {
       if (/AS awaiting/.test(text)) return { rows: [{ awaiting: 4, stalled: 2 }], rowCount: 1 };
       return { rows: [{ '?column?': 1 }], rowCount: 1 };
     });
-    const res = await new Promise<any>((resolve, reject) => {
-      http.get({ hostname: '127.0.0.1', port, path: '/health' }, (r) => {
-        let b = '';
-        r.on('data', (c) => (b += c));
-        r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(b) }));
-      }).on('error', reject);
-    });
+    const res = await getJson('/health/details', await tokenFor('MERCHANT_ADMIN'));
     expect(res.status).toBe(200);
     expect(res.body.queue).toMatchObject({ depth: 4, oldestPendingAgeSeconds: 12.5, dead: 1, unresolved: 2 });
     expect(res.body.awaitingSelfHeal).toBe(4);
@@ -368,6 +412,10 @@ describe('/health observability', () => {
     expect(res.body.circuitBreaker.state).toBe('CLOSED');
     expect(res.body.ml).toMatchObject({ timeoutMs: 500, timeoutRate: 0 });
     expect(res.body).toHaveProperty('spoolDepth');
+    // spec gh-5: login, STK-outcome and Daraja-latency counters
+    expect(res.body.login).toMatchObject({ success: expect.any(Number), failure: expect.any(Number), throttled: expect.any(Number) });
+    expect(res.body.stk).toMatchObject({ ACCEPTED: expect.any(Number), REJECTED: expect.any(Number), UNKNOWN: expect.any(Number) });
+    expect(res.body.darajaLatencyMs).toHaveProperty('p95');
   });
 });
 
@@ -481,5 +529,175 @@ describe('review fixes — hot path', () => {
     expect(parseTrustProxy('2')).toBe(2);
     expect(parseTrustProxy('loopback')).toBe('loopback');
     expect(parseTrustProxy('')).toBeUndefined();
+  });
+});
+
+describe('spec gh-5 — failed STK callbacks and the STK/C2B echo', () => {
+  const failedStk = (code: number) => ({
+    Body: {
+      stkCallback: {
+        MerchantRequestID: '29115-34620561-1',
+        CheckoutRequestID: 'ws_CO_FAILED_1',
+        ResultCode: code,
+        ResultDesc: 'Request cancelled by user',
+      },
+    },
+  });
+  const stkPaid = (receipt: string, amount: number) => ({
+    Body: {
+      stkCallback: {
+        CheckoutRequestID: 'ws_CO_PAID_1',
+        ResultCode: 0,
+        CallbackMetadata: {
+          Item: [
+            { Name: 'Amount', Value: amount },
+            { Name: 'MpesaReceiptNumber', Value: receipt },
+            { Name: 'TransactionDate', Value: 20261009120000 },
+            { Name: 'PhoneNumber', Value: 254708374149 },
+          ],
+        },
+      },
+    },
+  });
+
+  it('ResultCode != 0 (1032 cancelled, 1037 timeout) → the stk_requests row becomes FAILED with the code; no intake row; 200', async () => {
+    for (const code of [1032, 1037]) {
+      mockPgQuery.mockClear();
+      const res = await callback(failedStk(code));
+      expect(res).toEqual({ status: 200, body: { ResultCode: 0, ResultDesc: 'Accepted' } });
+      const [update] = sql(/UPDATE stk_requests SET status = 'FAILED'/);
+      expect(update[1]).toEqual(['ws_CO_FAILED_1', String(code), 'Request cancelled by user']);
+      expect(sql(/INSERT INTO mpesa_callbacks/)).toHaveLength(0);
+    }
+    expect(mockIntake.size).toBe(0);
+  });
+
+  it('a failed STK callback that cannot be recorded (Postgres down) → 503 so Daraja retries', async () => {
+    mockPg.down = true;
+    const err = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect((await callback(failedStk(1032))).status).toBe(503);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it('C2B confirmation echoing a stored STK payment (same receipt, same amount) → STK_CHANNEL_ECHO audit row, not a mutation', async () => {
+    expect((await callback(stkPaid('ECHO000001', 500))).status).toBe(200);
+    await tick();
+    mockPgQuery.mockClear();
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const res = await callback({ ...C2B, TransID: 'ECHO000001', TransAmount: '500.00' });
+      expect(res.status).toBe(200);
+    } finally {
+      warn.mockRestore();
+    }
+    const events = sql(/INSERT INTO security_events/);
+    expect(events).toHaveLength(1);
+    expect((events[0] as any[])[1][0]).toBe('STK_CHANNEL_ECHO');
+    expect(sql(/UPDATE escrow_accounts/)).toHaveLength(0); // no security hold
+    expect(mockIntake.size).toBe(1); // the STK intake row is kept; nothing new to settle
+  });
+
+  it('same receipt on the other channel with a different amount is still a payload mutation', async () => {
+    expect((await callback(stkPaid('ECHO000002', 500))).status).toBe(200);
+    await tick();
+    mockPgQuery.mockClear();
+    const err = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect((await callback({ ...C2B, TransID: 'ECHO000002', TransAmount: '501.00' })).status).toBe(200);
+    } finally {
+      err.mockRestore();
+    }
+    const events = sql(/INSERT INTO security_events/);
+    expect(events).toHaveLength(1);
+    expect((events[0] as any[])[1][0]).toBe('PAYLOAD_MUTATION');
+  });
+});
+
+describe('spec gh-5 — the real app mounts auth, payments, CORS and readiness', () => {
+  function raw(method: string, path: string, headers: Record<string, string> = {}, body?: string): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: any }> {
+    return new Promise((resolve, reject) => {
+      const h: Record<string, string | number> = { ...headers };
+      if (body !== undefined) {
+        h['Content-Type'] = 'application/json';
+        h['Content-Length'] = Buffer.byteLength(body);
+      }
+      const req = http.request({ hostname: '127.0.0.1', port, path, method, headers: h }, (res) => {
+        let b = '';
+        res.on('data', (c) => (b += c));
+        res.on('end', () => {
+          let parsed: any = b;
+          try {
+            parsed = b ? JSON.parse(b) : null;
+          } catch {
+            /* not JSON */
+          }
+          resolve({ status: res.statusCode!, headers: res.headers, body: parsed });
+        });
+      });
+      req.on('error', reject);
+      if (body !== undefined) req.write(body);
+      req.end();
+    });
+  }
+
+  it('POST /api/v1/auth/login with a bad body → 400 JSON (auth router mounted at /api/v1/auth)', async () => {
+    const res = await raw('POST', '/api/v1/auth/login', {}, JSON.stringify({ phone: 712345678 }));
+    expect(res.status).toBe(400);
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+    expect(res.body).toEqual({ error: 'invalid_request', fields: ['phone', 'pin'] });
+    expect((await raw('POST', '/api/v1/auth/login', {}, '{not json')).body).toEqual({ error: 'invalid_request' });
+  });
+
+  it('POST /api/v1/payments/stk without a token → 401', async () => {
+    const res = await raw('POST', '/api/v1/payments/stk', { 'Idempotency-Key': 'k1' }, JSON.stringify({ amount: 10, phone: '0712345678' }));
+    expect(res).toMatchObject({ status: 401, body: { error: 'unauthorized' } });
+  });
+
+  it('CORS: an allowlisted preflight gets credentialed headers incl. Idempotency-Key; a foreign origin gets none', async () => {
+    process.env.CORS_ORIGINS = 'https://pwa.salesmesh.example';
+    try {
+      const pre = {
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'content-type,idempotency-key,authorization',
+      };
+      const ok = await raw('OPTIONS', '/api/v1/payments/stk', { Origin: 'https://pwa.salesmesh.example', ...pre });
+      expect(ok.headers['access-control-allow-origin']).toBe('https://pwa.salesmesh.example');
+      expect(ok.headers['access-control-allow-credentials']).toBe('true');
+      expect(String(ok.headers['access-control-allow-headers']).toLowerCase()).toContain('idempotency-key');
+      const foreign = await raw('OPTIONS', '/api/v1/payments/stk', { Origin: 'https://evil.example', ...pre });
+      expect(foreign.headers['access-control-allow-origin']).toBeUndefined();
+    } finally {
+      delete process.env.CORS_ORIGINS;
+    }
+  });
+
+  it('/health/ready → 503 degraded when Redis is down, and when Postgres is down', async () => {
+    const err = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      mockRedis.down = true;
+      expect(await raw('GET', '/health/ready')).toMatchObject({ status: 503, body: { status: 'degraded' } });
+      mockRedis.down = false;
+      mockPg.down = true;
+      expect(await raw('GET', '/health/ready')).toMatchObject({ status: 503, body: { status: 'degraded' } });
+      mockPg.down = false;
+      expect(await raw('GET', '/health/ready')).toMatchObject({ status: 200, body: { status: 'ok' } });
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it('/health/details accepts X-Metrics-Token (HEALTH_METRICS_TOKEN) and reports per-process counters', async () => {
+    process.env.HEALTH_METRICS_TOKEN = 'scrape-secret-123';
+    try {
+      expect((await raw('GET', '/health/details', { 'X-Metrics-Token': 'wrong' })).status).toBe(401);
+      const ok = await raw('GET', '/health/details', { 'X-Metrics-Token': 'scrape-secret-123' });
+      expect(ok.status).toBe(200);
+      expect(ok.body.countersScope).toBe('per-process');
+    } finally {
+      delete process.env.HEALTH_METRICS_TOKEN;
+    }
   });
 });

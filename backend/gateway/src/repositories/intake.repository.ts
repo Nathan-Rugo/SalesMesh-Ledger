@@ -7,7 +7,7 @@
  * the visibility timeout therefore cannot overwrite the new owner's outcome.
  */
 
-import type { SourceChannel } from '../domain/callback';
+import { extractIngress, type SourceChannel } from '../domain/callback';
 import type { Db } from './db.types';
 
 export type IntakeStatus = 'PENDING' | 'PROCESSING' | 'UNRESOLVED' | 'SETTLED' | 'FAILED' | 'DEAD';
@@ -52,6 +52,29 @@ export async function insertIntake(db: Db, row: NewIntake): Promise<InsertOutcom
   );
   if (!existing.rows[0]) throw new Error('intake conflict without a visible row');
   return { outcome: 'existing', storedHash: existing.rows[0].raw_payload_hash };
+}
+
+/** Channel and amount of the stored intake row for a receipt (cross-channel echo check), or null. */
+export async function findIntakeSummary(db: Db, receipt: string): Promise<{ channel: SourceChannel; amountCents: number | null } | null> {
+  const { rows } = await db.query<{ source_channel: SourceChannel; payload: unknown }>(
+    'SELECT source_channel, payload FROM mpesa_callbacks WHERE mpesa_receipt_id = $1',
+    [receipt]
+  );
+  const r = rows[0];
+  if (!r || (r.source_channel !== 'DARAJA_STK' && r.source_channel !== 'C2B')) return null;
+  const ingress = extractIngress(r.payload);
+  return { channel: r.source_channel, amountCents: ingress.kind === 'ok' ? ingress.amountCents : null };
+}
+
+/**
+ * Same receipt, same amount, different channel: one payment Safaricom delivered as both an STK
+ * callback and a C2B confirmation. An echo, not a payload mutation.
+ */
+export function isChannelEcho(
+  stored: { channel: SourceChannel; amountCents: number | null } | null,
+  incoming: { channel: SourceChannel; amountCents: number }
+): boolean {
+  return !!stored && stored.channel !== incoming.channel && stored.amountCents === incoming.amountCents;
 }
 
 /**

@@ -8,6 +8,9 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
 import crypto from 'crypto';
 
+// Requiring the modules under ts-jest and connecting can exceed 5 s while other suites load the CPU.
+jest.setTimeout(30_000);
+
 const TEST_REDIS_URL = process.env.TEST_REDIS_URL;
 const describeRedis = TEST_REDIS_URL ? describe : describe.skip;
 

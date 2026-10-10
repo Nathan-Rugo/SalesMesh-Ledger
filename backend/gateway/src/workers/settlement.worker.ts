@@ -2,8 +2,9 @@
  * @file settlement.worker.ts
  * @description Drains the durable intake queue (mpesa_callbacks) into settled transactions.
  *
- * Per callback: parse the stored (redacted) payload → resolve the agent (STK record or C2B
- * agent_code) → load the agent's own 30-day history → score with ml-engine raw mode → in ONE
+ * Per callback: parse the stored (redacted) payload → resolve the agent (STK record — by
+ * CheckoutRequestID, or for an UNKNOWN initiation by the fallback match on (payer-phone HMAC,
+ * amount, time window) — or C2B agent_code) → load the agent's own 30-day history → score with ml-engine raw mode → in ONE
  * transaction (fenced on the claim token): bind the STK request, upsert the transaction, append
  * the INITIAL verification event, create the escrow hold, mark the callback SETTLED.
  *
@@ -18,6 +19,7 @@ import { assertPiiKey } from '../config/pii';
 import { settlementWorkerConfig, type SettlementWorkerConfig } from '../config/worker';
 import {
   CallbackParseError,
+  extractIngress,
   centsToAmount,
   centsToDecimal,
   counterpartyHash,
@@ -28,10 +30,15 @@ import {
 } from '../domain/callback';
 import { buildRawRequest } from '../domain/risk_request';
 import { consumeStkRequest, findAgentByCode, findStkRequest } from '../repositories/agent.repository';
+import { bindFallback, expireOpenRequests, expireStalePending, findFallbackCandidates } from '../repositories/stk.repository';
+import { purgeAuthData } from '../repositories/auth.repository';
+import { paymentsConfig, STK_EXPIRE_AFTER_MS } from '../config/stk';
 import { Rollback, withTransaction, type TxDb } from '../repositories/db.types';
 import {
   claimBatch,
+  findIntakeSummary,
   insertIntake,
+  isChannelEcho,
   lockClaimed,
   markFailed,
   markRetry,
@@ -40,7 +47,7 @@ import {
   sweepDead,
   type IntakeRow,
 } from '../repositories/intake.repository';
-import { hasPayloadMutation, insertSecurityEvent, recordPayloadMutation } from '../repositories/security.repository';
+import { hasPayloadMutation, insertSecurityEvent, recordChannelEcho, recordPayloadMutation } from '../repositories/security.repository';
 import { fetchHistory } from '../repositories/transaction.repository';
 import { EscrowService, escrowService } from '../services/escrow.service';
 import { resilientRiskClient, type ResilientRiskClient } from '../services/risk_client.service';
@@ -48,8 +55,14 @@ import { spoolService, type SpoolItem, type SpoolService } from '../services/spo
 
 export type Outcome = 'settled' | 'unresolved' | 'failed' | 'retry' | 'lease_lost';
 
+/** The STK request a callback consumes; `fallback` is set when it must first be bound (UNKNOWN row). */
+interface StkBinding {
+  stkRequestId: string;
+  fallback: { phoneHashes: string[]; amount: string; at: Date; checkoutRequestId: string } | null;
+}
+
 type Resolution =
-  | { kind: 'resolved'; agentId: string; checkoutRequestId: string | null }
+  | { kind: 'resolved'; agentId: string; stk: StkBinding | null }
   | { kind: 'unresolved'; reason: string; terminal: boolean; replay?: boolean };
 
 export interface SettlementWorkerDeps {
@@ -158,6 +171,22 @@ export class SettlementWorker {
     const dead = await sweepDead(this.pool, this.config.visibilityTimeoutMs, this.config.maxAttempts);
     if (dead > 0) console.error(`[SettlementWorker] ${dead} intake row(s) moved to DEAD (lease expired, attempts exhausted)`);
     await this.drainSpool().catch((e) => console.error('[SettlementWorker] spool drain failed:', (e as Error).message));
+    await this.stkAndAuthHousekeeping().catch((e) => console.error('[SettlementWorker] STK/auth housekeeping failed:', (e as Error).message));
+  }
+
+  /**
+   * UNKNOWN / stale PENDING STK requests no callback can match any more (STK_TTL + 10 min) become
+   * EXPIRED; refresh tokens expired/revoked > 30 days and auth_events (raw IPs) past their
+   * retention (AUTH_EVENTS_RETENTION_DAYS, default 90) are purged.
+   */
+  public async stkAndAuthHousekeeping(): Promise<void> {
+    const expired = await expireOpenRequests(this.pool, STK_EXPIRE_AFTER_MS);
+    if (expired > 0) console.warn(`[SettlementWorker] ${expired} STK request(s) EXPIRED (no callback matched)`);
+    const days = parseInt(process.env.AUTH_EVENTS_RETENTION_DAYS ?? '', 10);
+    const purged = await purgeAuthData(this.pool, 30, Number.isFinite(days) && days > 0 ? days : 90);
+    if (purged.tokens + purged.events > 0) {
+      console.info(`[SettlementWorker] retention purge: ${purged.tokens} refresh token(s), ${purged.events} auth event(s)`);
+    }
   }
 
   /** Claims one batch and processes it; returns the number of rows claimed. */
@@ -190,7 +219,7 @@ export class SettlementWorker {
     }
 
     try {
-      const resolution = await this.resolveAgent(parsed);
+      const resolution = await this.resolveAgent(parsed, new Date(row.received_at));
       if (resolution.kind === 'unresolved') return await this.unresolved(row, resolution);
 
       const at = effectivePaymentTime(parsed.paymentTime, new Date(row.received_at));
@@ -216,8 +245,13 @@ export class SettlementWorker {
       try {
         const settled = await withTransaction(this.pool, async (client: PoolClient) => {
           if (!(await lockClaimed(client, row.callback_id, row.claim_token))) throw new Rollback('lease_lost');
-          if (resolution.checkoutRequestId && !(await consumeStkRequest(client, resolution.checkoutRequestId, receipt))) {
-            throw new Rollback('stk_receipt_replay');
+          const stk = resolution.stk;
+          if (stk) {
+            // Fallback: re-select FOR UPDATE, re-count, bind only if still exactly this UNKNOWN row.
+            if (stk.fallback && !(await bindFallback(client, { ...stk.fallback, stkRequestId: stk.stkRequestId }))) {
+              throw new Rollback('stk_fallback_contended');
+            }
+            if (!(await consumeStkRequest(client, stk.stkRequestId, receipt))) throw new Rollback('stk_receipt_replay');
           }
           const securityHold = await hasPayloadMutation(client, receipt);
           const transactionId = await this.escrow.persistTransaction(
@@ -257,6 +291,10 @@ export class SettlementWorker {
         if ((error instanceof Rollback && error.value === 'stk_receipt_replay') || isUniqueViolation(error, 'stk_requests_consumed_receipt_key')) {
           return await this.unresolved(row, { kind: 'unresolved', reason: 'stk_receipt_replay', terminal: true, replay: true });
         }
+        if ((error instanceof Rollback && error.value === 'stk_fallback_contended') || isUniqueViolation(error, 'stk_requests_checkout_request_id_key')) {
+          // The candidate set changed under us: resolve afresh on the next attempt (fail closed now).
+          return await this.unresolved(row, { kind: 'unresolved', reason: 'stk_fallback_contended', terminal: false });
+        }
         throw error;
       }
     } catch (error) {
@@ -264,22 +302,61 @@ export class SettlementWorker {
     }
   }
 
-  private async resolveAgent(parsed: ParsedCallback): Promise<Resolution> {
+  private async resolveAgent(parsed: ParsedCallback, receivedAt: Date): Promise<Resolution> {
     if (parsed.channel === 'DARAJA_STK') {
       if (!parsed.checkoutRequestId) return { kind: 'unresolved', reason: 'stk_missing_checkout_request_id', terminal: true };
       const stk = await findStkRequest(this.pool, parsed.checkoutRequestId);
-      if (!stk) return { kind: 'unresolved', reason: 'stk_unknown_checkout_request_id', terminal: false };
-      if (stk.amountCents !== parsed.amountCents) return { kind: 'unresolved', reason: 'stk_amount_mismatch', terminal: true };
-      if (stk.consumedReceipt && stk.consumedReceipt !== parsed.receipt) {
-        return { kind: 'unresolved', reason: 'stk_receipt_replay', terminal: true, replay: true };
+      if (stk) {
+        if (stk.amountCents !== parsed.amountCents) return { kind: 'unresolved', reason: 'stk_amount_mismatch', terminal: true };
+        if (stk.consumedReceipt && stk.consumedReceipt !== parsed.receipt) {
+          return { kind: 'unresolved', reason: 'stk_receipt_replay', terminal: true, replay: true };
+        }
+        // A paid callback for a request recorded as rejected/failed is contradictory: review it.
+        if (stk.status === 'REJECTED' || stk.status === 'FAILED') {
+          return { kind: 'unresolved', reason: `stk_status_conflict_${stk.status.toLowerCase()}`, terminal: true };
+        }
+        return { kind: 'resolved', agentId: stk.agentId, stk: { stkRequestId: stk.stkRequestId, fallback: null } };
       }
-      return { kind: 'resolved', agentId: stk.agentId, checkoutRequestId: parsed.checkoutRequestId };
+      return this.fallbackMatch(parsed, receivedAt);
     }
     const code = normaliseAgentCode(parsed.billRefNumber);
     if (!code) return { kind: 'unresolved', reason: 'c2b_missing_agent_code', terminal: true };
     const agentId = await findAgentByCode(this.pool, code);
     if (!agentId) return { kind: 'unresolved', reason: 'c2b_unknown_agent_code', terminal: false };
-    return { kind: 'resolved', agentId, checkoutRequestId: null };
+    return { kind: 'resolved', agentId, stk: null };
+  }
+
+  /**
+   * CheckoutRequestID not on file: the initiation's Daraja response may have been lost (UNKNOWN).
+   * Match exactly one UNKNOWN request on (payer-phone HMAC — under any configured PII key —,
+   * amount, created within STK_TTL before the payment time). A PENDING candidate means its Daraja
+   * call may still answer: retry. No phone (masked/missing) → no fallback. More than one → review.
+   */
+  private async fallbackMatch(parsed: ParsedCallback, receivedAt: Date): Promise<Resolution> {
+    const unknownId: Resolution = { kind: 'unresolved', reason: 'stk_unknown_checkout_request_id', terminal: false };
+    if (!parsed.counterpartyHash) return unknownId;
+    const phoneHashes = [parsed.counterpartyHash, ...parsed.counterpartyAltHashes];
+    const at = effectivePaymentTime(parsed.paymentTime, receivedAt);
+    const amount = centsToDecimal(parsed.amountCents);
+    let candidates = await findFallbackCandidates(this.pool, { phoneHashes, amount, at });
+    const pending = candidates.filter((c) => c.status === 'PENDING');
+    if (pending.length > 0) {
+      // A PENDING row whose Daraja call cannot still be running (overall deadline + 10 s) is UNKNOWN by now.
+      const staleMs = paymentsConfig().stalePendingMs;
+      let expired = 0;
+      for (const c of pending) if (await expireStalePending(this.pool, c.stkRequestId, staleMs)) expired += 1;
+      if (expired > 0) candidates = await findFallbackCandidates(this.pool, { phoneHashes, amount, at });
+    }
+    if (candidates.some((c) => c.status === 'PENDING')) return { kind: 'unresolved', reason: 'stk_fallback_pending', terminal: false };
+    if (candidates.length > 1) return { kind: 'unresolved', reason: 'stk_fallback_ambiguous', terminal: true };
+    if (candidates.length === 0) return unknownId;
+    const [c] = candidates;
+    console.info(`[SettlementWorker] ${parsed.receipt}: CheckoutRequestID unknown; fallback-matched an UNKNOWN STK request`);
+    return {
+      kind: 'resolved',
+      agentId: c.agentId,
+      stk: { stkRequestId: c.stkRequestId, fallback: { phoneHashes, amount, at, checkoutRequestId: parsed.checkoutRequestId! } },
+    };
   }
 
   private async unresolved(row: IntakeRow, r: Extract<Resolution, { kind: 'unresolved' }>): Promise<Outcome> {
@@ -353,7 +430,12 @@ export class SettlementWorker {
         });
         if (res.outcome === 'existing' && res.storedHash !== item.hash) {
           const sameKey = res.storedHash.split(':')[0] === item.hash.split(':')[0];
-          if (sameKey) {
+          const incoming = extractIngress(item.payload);
+          const stored = incoming.kind === 'ok' ? await findIntakeSummary(this.pool, item.receipt) : null;
+          if (incoming.kind === 'ok' && isChannelEcho(stored, { channel: item.channel, amountCents: incoming.amountCents })) {
+            console.warn(`[SettlementWorker] spooled ${item.receipt} is a cross-channel echo of a stored intake row; recorded, not settled`);
+            await recordChannelEcho(this.pool, item.receipt, res.storedHash, item.hash, `spooled ${item.channel} echo`);
+          } else if (sameKey) {
             console.error(`[SECURITY ALARM] Payload mutation on receipt ${item.receipt} (spool)`);
             await recordPayloadMutation(this.pool, item.receipt, res.storedHash, item.hash);
           } else {

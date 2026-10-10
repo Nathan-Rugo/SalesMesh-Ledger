@@ -30,6 +30,21 @@ follow your scheduled key-management policy.
    The hot path compares an incoming payload against a stored `k1:` hash using the
    previous key. A Daraja retry of a callback first received under `k1` therefore still
    counts as a duplicate, and does not raise a false mutation alarm.
+
+   While a previous key is configured, a paid STK callback also stores its `PhoneNumber`
+   HMAC under the previous key (`PhoneNumberAltHashes` in the redacted payload). The
+   settlement worker's STK fallback match (spec gh-5: a callback whose CheckoutRequestID
+   was never recorded because the Daraja response was lost) can therefore still pair it
+   with an `stk_requests` row whose `phone_hash` was made under `k1` before the switch.
+   The STK idempotency fingerprint is likewise checked under either key (a fingerprint made
+   under a key that is no longer configured is treated as a match, never as key reuse).
+
+   Login brute-force state is keyed by an HMAC of the phone too. While the previous key is
+   configured, hard locks and progressive lockouts written under it are still honoured, and
+   trusted-device cookie entries bound under it still verify. Once the previous key is removed,
+   those lockouts lapse (an admin can re-check `security_events` for `LOGIN_LOCKOUT` rows from the
+   last 24 h) and agents re-establish device trust at their next successful login. Keep the
+   previous key for at least 24 h (the hard-cap window) for this reason as well.
 3. **Keep the previous key** for at least the dedup window:
    - `REDIS_IDEMPOTENCY_TTL_MS`, 24 h by default;
    - and Daraja's retry window.
@@ -58,7 +73,7 @@ Counterparty hashes are not re-computable: the MSISDN is never stored. After a r
 
 ## Verification after rotation
 
-- `GET /health` reports normal queue depth. The DEAD/UNRESOLVED counts and
+- `GET /health/details` (MERCHANT_ADMIN token) reports normal queue depth. The DEAD/UNRESOLVED counts and
   `failSafeQuarantined` do not grow.
 - `security_events` shows no burst of `PAYLOAD_MUTATION` rows in the hours after the
   switch.

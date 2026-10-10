@@ -1,13 +1,25 @@
 /**
  * @file security.repository.ts
- * @description Persistent security alarms (payload mutation, STK receipt replay).
+ * @description Persistent security alarms. Subject-generic (spec gh-5): a receipt (payload
+ * mutation, STK receipt replay, STK/C2B cross-channel echo) or a user / refresh-token family
+ * (refresh token reuse, login lockout, PIN change).
  */
 
 import type { Db, TxDb } from './db.types';
 import { withTransaction } from './db.types';
 
-export type SecurityEventType = 'PAYLOAD_MUTATION' | 'STK_RECEIPT_REPLAY';
+export type SecurityEventType =
+  | 'ADMIN_UNLOCK'
+  | 'ADMIN_DISABLE'
+  | 'ADMIN_PIN_RESET'
+  | 'PAYLOAD_MUTATION'
+  | 'STK_RECEIPT_REPLAY'
+  | 'STK_CHANNEL_ECHO'
+  | 'REFRESH_TOKEN_REUSE'
+  | 'LOGIN_LOCKOUT'
+  | 'PIN_CHANGED';
 
+/** Receipt-subject alarm; deduplicated on (type, receipt, incoming hash). */
 export async function insertSecurityEvent(
   db: Db,
   e: { type: SecurityEventType; receipt: string; originalHash: string | null; incomingHash: string; detail: string }
@@ -15,9 +27,36 @@ export async function insertSecurityEvent(
   await db.query(
     `INSERT INTO security_events (event_type, mpesa_receipt_id, original_hash, incoming_hash, detail)
      VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT ON CONSTRAINT security_events_dedup DO NOTHING`,
+     ON CONFLICT DO NOTHING`,
     [e.type, e.receipt, e.originalHash, e.incomingHash, e.detail.slice(0, 2000)]
   );
+}
+
+/** User / refresh-family alarm; one REFRESH_TOKEN_REUSE per family (partial unique index). */
+export async function insertSubjectSecurityEvent(
+  db: Db,
+  e: { type: SecurityEventType; userId: string | null; familyId?: string | null; detail: string }
+): Promise<void> {
+  await db.query(
+    `INSERT INTO security_events (event_type, subject_user_id, family_id, detail)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT DO NOTHING`,
+    [e.type, e.userId, e.familyId ?? null, e.detail.slice(0, 2000)]
+  );
+}
+
+/**
+ * Same receipt, same amount, other channel: Safaricom delivered one payment as both an STK
+ * callback and a C2B confirmation. An audit row only — no settlement, no security hold.
+ */
+export async function recordChannelEcho(
+  db: Db,
+  receipt: string,
+  storedHash: string,
+  incomingHash: string,
+  detail: string
+): Promise<void> {
+  await insertSecurityEvent(db, { type: 'STK_CHANNEL_ECHO', receipt, originalHash: storedHash, incomingHash, detail });
 }
 
 /**
