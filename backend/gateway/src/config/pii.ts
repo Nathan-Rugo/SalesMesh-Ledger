@@ -19,9 +19,11 @@ import crypto from 'crypto';
  *  - payload / counterparty: callback tamper-evidence and the payer MSISDN (spec gh-6);
  *  - auth: login throttle keys and audit rows (phone, user agent);
  *  - device: the trusted-device cookie MAC;
- *  - stk_fingerprint: the STK idempotency fingerprint (phone, amount).
+ *  - stk_fingerprint: the STK idempotency fingerprint (phone, amount);
+ *  - reconciled: the canonical bytes of an intake row synthesised from an M-Pesa statement;
+ *  - phone_mask: the visible prefix/suffix of a customer MSISDN (matches masked statement phones).
  */
-export type HashDomain = 'payload' | 'counterparty' | 'auth' | 'device' | 'stk_fingerprint';
+export type HashDomain = 'payload' | 'counterparty' | 'auth' | 'device' | 'stk_fingerprint' | 'reconciled' | 'phone_mask';
 
 interface KeyMaterial {
   id: string;

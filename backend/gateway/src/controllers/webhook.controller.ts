@@ -17,24 +17,44 @@
  *            one payment) is recorded as a cross-channel echo instead (audit row, no hold).
  *   gh-5   — A failed STK callback (ResultCode != 0) marks its stk_requests row FAILED with the
  *            code (no intake row, no settlement); 503 when that cannot be recorded.
+ *   gh-6-recon — A genuine callback for a receipt recovered from an M-Pesa statement (RECONCILED
+ *            intake row) is checked BEFORE the channel-echo check: it confirms the row
+ *            (RECONCILED_CALLBACK_LATE, 200, escrow untouched) only on positive attribution
+ *            (STK: its CheckoutRequestID's request belongs to the recovered row's agent; C2B: same
+ *            account) and no phone contradiction; a different amount is a PAYLOAD_MUTATION, any
+ *            other difference a RECONCILE_ATTRIBUTION_CONFLICT. Confirmation is atomic: of two
+ *            different concurrent deliveries one confirms, the other is a mutation.
  *   Kenya DPA 2019 — payloads are redacted before storage and never logged.
  */
 
 import { Request, Response } from 'express';
 import { hotPool, HOT_PATH_TIMEOUT_MS } from '../config/db';
-import { keyedHashMatches } from '../config/pii';
+import { KEYED_HASH_RE, keyedHashMatches } from '../config/pii';
 import {
+  callbackIdentity,
   extractIngress,
   isPhoneLike,
   normaliseAgentCode,
+  parseStoredCallback,
   payloadShape,
+  phoneHashVerdict,
+  plainMsisdn,
   redactPayload,
   toCents,
   type SourceChannel,
 } from '../domain/callback';
-import { findAgentByCode } from '../repositories/agent.repository';
-import { findIntakeSummary, insertIntake, isChannelEcho } from '../repositories/intake.repository';
-import { recordChannelEcho, recordPayloadMutation } from '../repositories/security.repository';
+import { consumeStkRequest, findAgentByCode, findStkAttribution, type StkAttribution } from '../repositories/agent.repository';
+import { withTransaction } from '../repositories/db.types';
+import {
+  bindReconciledRow,
+  confirmReconciledByCallback,
+  findIntakeSummary,
+  findStoredIdentity,
+  insertIntake,
+  isChannelEcho,
+  type StoredIntakeIdentity,
+} from '../repositories/intake.repository';
+import { insertSecurityEvent, recordChannelEcho, recordPayloadMutation, recordReceiptHold } from '../repositories/security.repository';
 import { markStkFailed } from '../repositories/stk.repository';
 import { metrics } from '../services/metrics.service';
 import { idempotencyService } from '../services/idempotency.service';
@@ -67,6 +87,20 @@ function samePayload(storedHash: string, incomingHash: string, rawBytes: Buffer)
   if (storedHash === incomingHash) return true;
   // null: made with a key no longer configured — cannot verify, so fail closed (alarm).
   return keyedHashMatches(storedHash, 'payload', rawBytes) === true;
+}
+
+/** The account (agent code, or its HMAC when phone-like) a statement-recovered row was paid to. */
+function reconciledAccount(payload: unknown): string | null {
+  const p = payload as any;
+  const v = p?.Reconciliation?.accountNo ?? p?.BillRefNumber;
+  return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
+/** A C2B BillRefNumber equals the stored account: normalised, or under the same HMAC when it was phone-like. */
+function billRefMatches(stored: string | null, incoming: string | null): boolean {
+  if (!stored || !incoming) return false;
+  if (KEYED_HASH_RE.test(stored)) return keyedHashMatches(stored, 'counterparty', `billref:${incoming.replace(/[\s+()-]/g, '')}`) === true;
+  return normaliseAgentCode(stored) === normaliseAgentCode(incoming);
 }
 
 /**
@@ -142,7 +176,7 @@ class WebhookController {
         const same = samePayload(claim.storedHash, hash, rawBytes);
         if (claim.stored) {
           if (same) console.info(`[Webhook] Duplicate for receipt ${receipt} already stored — ACK.`);
-          else await this.conflict(receipt, claim.storedHash, hash, { channel, amountCents }, 'redis', deadline);
+          else await this.conflict(receipt, claim.storedHash, hash, { channel, amountCents, body, rawBytes }, 'redis', deadline);
           ack();
           return;
         }
@@ -155,7 +189,7 @@ class WebhookController {
         deadline
       );
       if (result.outcome === 'existing' && !samePayload(result.storedHash, hash, rawBytes)) {
-        await this.conflict(receipt, result.storedHash, hash, { channel, amountCents }, 'postgres', deadline);
+        await this.conflict(receipt, result.storedHash, hash, { channel, amountCents, body, rawBytes }, 'postgres', deadline);
         ack();
         return;
       }
@@ -191,10 +225,16 @@ class WebhookController {
     receipt: string,
     storedHash: string,
     incomingHash: string,
-    incoming: { channel: SourceChannel; amountCents: number },
+    incoming: { channel: SourceChannel; amountCents: number; body: unknown; rawBytes: Buffer },
     source: string,
     deadline: number
   ): Promise<void> {
+    // A receipt recovered from the statement: checked before the channel-echo check.
+    const identity = await withDeadline(findStoredIdentity(hotPool, receipt), deadline);
+    if (identity?.origin === 'RECONCILED') {
+      await this.lateCallback(receipt, identity, incomingHash, incoming, deadline);
+      return;
+    }
     const stored = await withDeadline(findIntakeSummary(hotPool, receipt), deadline);
     if (stored && isChannelEcho(stored, incoming)) {
       console.warn(`[Webhook] Receipt ${receipt} delivered on both STK and C2B (same amount) — cross-channel echo recorded, no settlement.`);
@@ -203,6 +243,136 @@ class WebhookController {
       return;
     }
     await this.mutation(receipt, storedHash, incomingHash, source, deadline);
+  }
+
+  /**
+   * The genuine callback for a statement-recovered receipt. Confirms the RECONCILED row only when
+   * amount, channel, CheckoutRequestID / agent and the phone HMAC (when stored) all match; never
+   * changes escrow. Later deliveries are compared against the confirmed callback's hash.
+   */
+  private async lateCallback(
+    receipt: string,
+    identity: StoredIntakeIdentity,
+    incomingHash: string,
+    incoming: { channel: SourceChannel; amountCents: number; body: unknown; rawBytes: Buffer },
+    deadline: number
+  ): Promise<void> {
+    const storedIngress = extractIngress(identity.payload);
+    const storedCents = storedIngress.kind === 'ok' ? storedIngress.amountCents : null;
+    if (identity.confirmedHash) {
+      if (samePayload(identity.confirmedHash, incomingHash, incoming.rawBytes)) {
+        console.info(`[Webhook] Late callback for recovered receipt ${receipt} already confirmed — ACK.`);
+        void idempotencyService.markStored(receipt, identity.confirmedHash);
+        return;
+      }
+      if (isChannelEcho({ channel: identity.channel, amountCents: storedCents }, incoming)) {
+        await withDeadline(recordChannelEcho(hotPool, receipt, identity.confirmedHash, incomingHash, `${identity.channel} recovered row echoed by ${incoming.channel}`), deadline);
+        return;
+      }
+      await this.mutation(receipt, identity.confirmedHash, incomingHash, 'late-callback', deadline);
+      return;
+    }
+    // A different amount is a mutation, never a late confirmation.
+    if (storedCents !== incoming.amountCents) {
+      await this.mutation(receipt, identity.rawPayloadHash, incomingHash, 'late-callback', deadline);
+      return;
+    }
+
+    // Confirm only on positive attribution evidence; anything else is a conflict (+ hold).
+    const id = callbackIdentity(incoming.body);
+    const storedAccount = reconciledAccount(identity.payload);
+    const differs: string[] = [];
+    let request: StkAttribution | null = null; // the request this genuine callback belongs to
+    if (incoming.channel === 'DARAJA_STK') {
+      request = id.checkoutRequestId ? await withDeadline(findStkAttribution(hotPool, { checkoutRequestId: id.checkoutRequestId }), deadline) : null;
+      if (!request && identity.stkRequestId) {
+        // Daraja's answer to the initiation was lost (UNKNOWN): the bound request has no CheckoutRequestID.
+        // Accepted only if that request is unbound to any id and its customer phone positively matches.
+        const bound = await withDeadline(findStkAttribution(hotPool, { stkRequestId: identity.stkRequestId }), deadline);
+        const msisdn = plainMsisdn(id.phoneRaw);
+        if (bound && !bound.checkoutRequestId && bound.phoneHash && msisdn && phoneHashVerdict(bound.phoneHash, 'counterparty', msisdn) === true) request = bound;
+      }
+      if (!request) differs.push('CheckoutRequestID not on file');
+      else {
+        if (identity.stkRequestId && request.stkRequestId !== identity.stkRequestId) differs.push('CheckoutRequestID of another request');
+        if (request.consumedReceipt && request.consumedReceipt !== receipt) differs.push('request consumed by another receipt');
+        if (!storedAccount || !request.agentCode || normaliseAgentCode(storedAccount) !== request.agentCode) differs.push('agent');
+      }
+    } else if (!billRefMatches(storedAccount, id.billRefNumber)) differs.push('account');
+
+    // Phone: the recovered row's own full phone, else the bound request's phone / masked fingerprint.
+    // Masked, provider-hashed or retired-key values cannot be compared and never count as a mismatch.
+    const msisdn = plainMsisdn(id.phoneRaw);
+    if (msisdn && differs.length === 0) {
+      let storedPhone: string | null = null;
+      try {
+        storedPhone = parseStoredCallback(identity.payload).counterpartyHash;
+      } catch {
+        storedPhone = null;
+      }
+      const req = request ?? (identity.stkRequestId ? await withDeadline(findStkAttribution(hotPool, { stkRequestId: identity.stkRequestId }), deadline) : null);
+      const verdict = storedPhone
+        ? phoneHashVerdict(storedPhone, 'counterparty', msisdn)
+        : req?.phoneHash
+          ? phoneHashVerdict(req.phoneHash, 'counterparty', msisdn)
+          : req?.phoneMaskHash
+            ? phoneHashVerdict(req.phoneMaskHash, 'phone_mask', msisdn)
+            : null;
+      if (verdict === false) differs.push('phone');
+    }
+
+    if (differs.length > 0) {
+      console.error(`[SECURITY ALARM] Late callback for recovered receipt ${receipt} not attributable (${differs.join(', ')}) — conflict.`);
+      await withDeadline(
+        recordReceiptHold(hotPool, {
+          type: 'RECONCILE_ATTRIBUTION_CONFLICT',
+          receipt,
+          originalHash: identity.rawPayloadHash,
+          incomingHash,
+          detail: `late genuine callback not attributable to the statement-recovered row: ${differs.join(', ')}`,
+        }),
+        deadline
+      );
+      return;
+    }
+
+    const won = await withDeadline(
+      withTransaction(hotPool, async (tx) => {
+        const confirmed = await confirmReconciledByCallback(tx, receipt, incomingHash);
+        if (confirmed !== incomingHash) return confirmed; // another delivery confirmed first
+        if (request && !identity.stkRequestId) {
+          // The import could not bind it (ambiguous); the genuine callback proves the request.
+          if (!(await consumeStkRequest(tx, request.stkRequestId, receipt))) throw new Error('request consumed meanwhile');
+          await bindReconciledRow(tx, receipt, request.stkRequestId);
+        }
+        await insertSecurityEvent(tx, {
+          type: 'RECONCILED_CALLBACK_LATE',
+          receipt,
+          originalHash: identity.rawPayloadHash,
+          incomingHash,
+          detail: 'genuine callback arrived after the payment was recovered from the statement; attribution verified, row confirmed',
+        });
+        if (request && (request.status === 'FAILED' || request.status === 'REJECTED')) {
+          await insertSecurityEvent(tx, {
+            type: 'STK_STATUS_CONFLICT',
+            receipt,
+            originalHash: identity.rawPayloadHash,
+            incomingHash,
+            detail: `genuine paid callback for an STK request recorded ${request.status}`,
+            stkRequestId: request.stkRequestId,
+          });
+        }
+        return confirmed;
+      }),
+      deadline
+    );
+    if (won !== incomingHash) {
+      if (won && samePayload(won, incomingHash, incoming.rawBytes)) return;
+      await this.mutation(receipt, won ?? identity.rawPayloadHash, incomingHash, 'late-callback', deadline);
+      return;
+    }
+    console.info(`[Webhook] Late genuine callback confirms recovered receipt ${receipt} — ACK (escrow unchanged).`);
+    void idempotencyService.markStored(receipt, incomingHash);
   }
 
   /** Same receipt, different bytes: persist the alarm (escrow → QUARANTINED) and keep the original. */

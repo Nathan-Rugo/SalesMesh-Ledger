@@ -14,7 +14,7 @@ import { RedisThrottleStore, StkRateLimiter, type ThrottleStore } from '../../sr
 import { signAccessToken } from '../../src/auth/tokens';
 import { PaymentsController } from '../../src/controllers/payments.controller';
 import { DarajaClient } from '../../src/daraja/client';
-import { formatDarajaTime, redactPayload } from '../../src/domain/callback';
+import { formatDarajaTime, msisdnMaskHash, redactPayload } from '../../src/domain/callback';
 import { insertIntake } from '../../src/repositories/intake.repository';
 import { markStkFailed } from '../../src/repositories/stk.repository';
 import { createPaymentsRouter } from '../../src/routes/payments.routes';
@@ -151,6 +151,8 @@ describeDb('STK initiation → callback → settlement (real Postgres)', () => {
     const { rows: [row] } = await db.pool.query(`SELECT * FROM stk_requests WHERE stk_request_id = $1`, [res.body.stk_request_id]);
     expect(row).toMatchObject({ status: 'ACCEPTED', checkout_request_id: 'ws_CO_E2E_1', account_reference: a.code, idempotency_key: 'e2e-1' });
     expect(row.phone_hash).toMatch(/^k1:/);
+    // spec gh-6-recon: the masked-phone fingerprint a masked statement phone is matched against
+    expect(row.phone_mask_hash).toBe(msisdnMaskHash('254712345678'));
     expect(JSON.stringify(row)).not.toContain('712345678');
 
     await stkCallback('E2EA000001', 'ws_CO_E2E_1', 1500, new Date(Date.now() + 2000));

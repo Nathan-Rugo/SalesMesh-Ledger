@@ -12,3 +12,7 @@ if (!process.env.JWT_PRIVATE_KEY) {
 // Cheap scrypt (allowed only under NODE_ENV=test) and no failed-login latency floor, for speed.
 process.env.AUTH_SCRYPT_LOG_N = process.env.AUTH_SCRYPT_LOG_N || '10';
 process.env.AUTH_FAILURE_MIN_MS = process.env.AUTH_FAILURE_MIN_MS || '0';
+// The production hot-path budget is 150 ms. Under a fully loaded parallel jest run a starved
+// worker can exceed it and turn an expected 200 into a 503, so tests use a generous deadline;
+// the one test that exercises the deadline itself delays Postgres past this value.
+process.env.HOT_PATH_DEADLINE_MS = process.env.HOT_PATH_DEADLINE_MS || '1500';

@@ -14,3 +14,15 @@ FAILED or EXPIRED — and stay with the settlement records).
 
 No table stores a PIN, a token, a raw customer MSISDN or a raw user agent. A refresh-token family
 also ends `REFRESH_FAMILY_MAX_DAYS` (default 30) after login regardless of activity.
+
+## Reconciliation records (spec gh-6-recon)
+
+These are financial records: keep them **5 years** (Kenya Tax Procedures Act, 2015, s. 23). Access is
+restricted to MERCHANT_ADMIN operators and auditors. Nothing purges them automatically: delete them
+by hand once the 5 years have passed.
+
+| Data | Contains | Kept for | Access |
+|---|---|---|---|
+| `reconcile-evidence/<sha256>/` (`RECONCILE_EVIDENCE_DIR`) | the original M-Pesa statement CSVs, **including customer phone numbers and names** | 5 years from the import | directory 0700, files 0600, owned by the service account; never in backups readable by others, never in git |
+| `reconciliation_runs` | file SHA-256, operator user_id, counts, evidence path (no customer data) | 5 years | database admins / auditors |
+| `reconciliation_exceptions` | receipts, amounts and escrow ids of CLAWBACK_DUE / RELEASED_NOT_ON_STATEMENT cases | 5 years after `resolved_at` | database admins / auditors |

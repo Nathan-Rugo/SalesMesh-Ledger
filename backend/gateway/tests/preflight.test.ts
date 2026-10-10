@@ -39,8 +39,13 @@ describe('preflight (startup refusal gates)', () => {
     expect(badUrl.fatal).toEqual([expect.stringMatching(/unexpanded/)]);
   });
 
+  it('RECONCILE_ENABLED without the Daraja credentials → fatal (the STK Query sweep needs them)', async () => {
+    expect((await preflight({ ...base, RECONCILE_ENABLED: 'true' }, migrated)).fatal).toEqual([expect.stringMatching(/missing DARAJA_CONSUMER_KEY/)]);
+    expect((await preflight({ ...base, ...daraja, STK_ENABLED: 'false', RECONCILE_ENABLED: 'true' }, migrated)).fatal).toEqual([]);
+  });
+
   it('a database at migration 001 only (or unreachable) → fatal', async () => {
-    expect((await preflight(base, only001)).fatal).toEqual([expect.stringMatching(/not migrated.*002_auth_stk_initiation/)]);
+    expect((await preflight(base, only001)).fatal).toEqual([expect.stringMatching(/not migrated.*003_reconciliation/)]);
     const down: any = { query: jest.fn(async () => Promise.reject(new Error('connect ECONNREFUSED'))) };
     expect((await preflight(base, down)).fatal).toEqual([expect.stringMatching(/ECONNREFUSED/)]);
   });

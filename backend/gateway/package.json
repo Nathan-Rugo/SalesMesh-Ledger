@@ -16,10 +16,12 @@
     "user:unlock": "node dist/scripts/user-unlock.js",
     "user:disable": "node dist/scripts/user-admin.js disable",
     "user:reset-pin": "node dist/scripts/user-admin.js reset-pin",
-    "keys:generate": "node dist/scripts/keys-generate.js"
+    "keys:generate": "node dist/scripts/keys-generate.js",
+    "reconcile:import": "node dist/scripts/reconcile-import.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
+    "csv-parse": "^5.6.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "helmet": "^8.0.0",

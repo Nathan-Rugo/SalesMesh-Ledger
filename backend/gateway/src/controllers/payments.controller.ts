@@ -18,7 +18,7 @@ import type { Request, Response } from 'express';
 import pool from '../config/db';
 import { alternateKeyedHashes, keyedHash, keyedHashMatches } from '../config/pii';
 import { paymentsConfig, type PaymentsConfig } from '../config/stk';
-import { normaliseKenyanMsisdn, normalisedMsisdnHash } from '../domain/callback';
+import { msisdnMaskHash, normaliseKenyanMsisdn, normalisedMsisdnHash } from '../domain/callback';
 import { DarajaClient, darajaClient as defaultDaraja } from '../daraja/client';
 import { StkRateLimiter, ThrottleUnavailableError } from '../auth/throttle';
 import { findAgentForUser } from '../repositories/agent.repository';
@@ -159,6 +159,7 @@ export class PaymentsController {
         idempotencyKey: key,
         fingerprint: keyedHash('stk_fingerprint', fpInput),
         phoneHash,
+        phoneMaskHash: msisdnMaskHash(msisdn),
         amount,
         accountReference: agentCode,
       });

@@ -7,10 +7,13 @@
  * the visibility timeout therefore cannot overwrite the new owner's outcome.
  */
 
-import { extractIngress, type SourceChannel } from '../domain/callback';
+import { checkoutRequestIdOf, extractIngress, type SourceChannel } from '../domain/callback';
 import type { Db } from './db.types';
 
 export type IntakeStatus = 'PENDING' | 'PROCESSING' | 'UNRESOLVED' | 'SETTLED' | 'FAILED' | 'DEAD';
+
+/** CALLBACK: delivered by Daraja. RECONCILED: synthesised from an M-Pesa statement (spec gh-6-recon). */
+export type IntakeOrigin = 'CALLBACK' | 'RECONCILED';
 
 export interface IntakeRow {
   callback_id: string;
@@ -23,6 +26,8 @@ export interface IntakeRow {
   resolve_attempts: number;
   claim_token: string;
   received_at: Date;
+  /** Absent on rows built by older code paths / tests: treated as CALLBACK. */
+  origin?: IntakeOrigin;
 }
 
 export interface NewIntake {
@@ -31,6 +36,10 @@ export interface NewIntake {
   channel: SourceChannel;
   payload: unknown; // already redacted
   receivedAt?: Date;
+  /** Reconciliation (spec gh-6-recon): a statement-recovered row and its run / bound STK request. */
+  origin?: IntakeOrigin;
+  reconciliationRunId?: string | null;
+  stkRequestId?: string | null;
 }
 
 export type InsertOutcome = { outcome: 'inserted'; callbackId: string } | { outcome: 'existing'; storedHash: string };
@@ -38,11 +47,22 @@ export type InsertOutcome = { outcome: 'inserted'; callbackId: string } | { outc
 /** Inserts the intake row; on a receipt conflict returns the hash already stored (Postgres is the dedup truth). */
 export async function insertIntake(db: Db, row: NewIntake): Promise<InsertOutcome> {
   const { rows } = await db.query<{ callback_id: string }>(
-    `INSERT INTO mpesa_callbacks (mpesa_receipt_id, raw_payload_hash, source_channel, payload, received_at)
-     VALUES ($1, $2, $3, $4::jsonb, COALESCE($5::timestamptz, NOW()))
+    `INSERT INTO mpesa_callbacks (mpesa_receipt_id, raw_payload_hash, source_channel, payload, received_at,
+                                  checkout_request_id, origin, reconciliation_run_id, stk_request_id)
+     VALUES ($1, $2, $3, $4::jsonb, COALESCE($5::timestamptz, NOW()), $6, $7, $8, $9)
      ON CONFLICT (mpesa_receipt_id) DO NOTHING
      RETURNING callback_id`,
-    [row.receipt, row.hash, row.channel, JSON.stringify(row.payload), row.receivedAt?.toISOString() ?? null]
+    [
+      row.receipt,
+      row.hash,
+      row.channel,
+      JSON.stringify(row.payload),
+      row.receivedAt?.toISOString() ?? null,
+      row.channel === 'DARAJA_STK' ? checkoutRequestIdOf(row.payload) : null,
+      row.origin ?? 'CALLBACK',
+      row.reconciliationRunId ?? null,
+      row.stkRequestId ?? null,
+    ]
   );
   if (rows[0]?.callback_id) return { outcome: 'inserted', callbackId: rows[0].callback_id };
   // New statement → new snapshot: sees a concurrent insert that just committed.
@@ -64,6 +84,62 @@ export async function findIntakeSummary(db: Db, receipt: string): Promise<{ chan
   if (!r || (r.source_channel !== 'DARAJA_STK' && r.source_channel !== 'C2B')) return null;
   const ingress = extractIngress(r.payload);
   return { channel: r.source_channel, amountCents: ingress.kind === 'ok' ? ingress.amountCents : null };
+}
+
+/** What a late genuine callback is compared against when its receipt was recovered from a statement. */
+export interface StoredIntakeIdentity {
+  origin: IntakeOrigin;
+  channel: SourceChannel;
+  payload: unknown;
+  rawPayloadHash: string;
+  checkoutRequestId: string | null;
+  stkRequestId: string | null;
+  confirmedHash: string | null;
+}
+
+export async function findStoredIdentity(db: Db, receipt: string): Promise<StoredIntakeIdentity | null> {
+  const { rows } = await db.query(
+    `SELECT origin, source_channel, payload, raw_payload_hash, checkout_request_id, stk_request_id, confirmed_hash
+       FROM mpesa_callbacks WHERE mpesa_receipt_id = $1`,
+    [receipt]
+  );
+  const r = rows[0];
+  if (!r || !r.origin) return null;
+  return {
+    origin: r.origin,
+    channel: r.source_channel,
+    payload: r.payload,
+    rawPayloadHash: r.raw_payload_hash,
+    checkoutRequestId: r.checkout_request_id ?? null,
+    stkRequestId: r.stk_request_id ?? null,
+    confirmedHash: r.confirmed_hash ?? null,
+  };
+}
+
+/**
+ * Inside a transaction: a genuine callback matched a statement-recovered (RECONCILED) receipt.
+ * Locks the row and confirms it with the callback's hash unless another delivery confirmed it
+ * first. Returns the confirmed hash now stored — the caller's own hash only if it won. Never
+ * touches escrow or settlement state.
+ */
+export async function confirmReconciledByCallback(db: Db, receipt: string, incomingHash: string): Promise<string | null> {
+  const { rows } = await db.query<{ confirmed_hash: string | null }>(
+    `SELECT confirmed_hash FROM mpesa_callbacks WHERE mpesa_receipt_id = $1 AND origin = 'RECONCILED' FOR UPDATE`,
+    [receipt]
+  );
+  if (!rows[0]) return null;
+  if (rows[0].confirmed_hash) return rows[0].confirmed_hash;
+  await db.query(
+    `UPDATE mpesa_callbacks SET confirmed_by_callback_at = NOW(), confirmed_hash = $2, updated_at = NOW()
+      WHERE mpesa_receipt_id = $1 AND confirmed_hash IS NULL`,
+    [receipt, incomingHash]
+  );
+  return incomingHash;
+}
+
+/** A recovered row that was unbound (ambiguous import) is bound to the request its genuine callback proved. */
+export async function bindReconciledRow(db: Db, receipt: string, stkRequestId: string): Promise<void> {
+  await db.query(`UPDATE mpesa_callbacks SET stk_request_id = $2, updated_at = NOW() WHERE mpesa_receipt_id = $1 AND stk_request_id IS NULL`, [receipt, stkRequestId]);
 }
 
 /**
@@ -95,7 +171,7 @@ export async function claimBatch(db: Db, limit: number, visibilityMs: number, ma
              LIMIT $1
              FOR UPDATE SKIP LOCKED)
       RETURNING callback_id, mpesa_receipt_id, raw_payload_hash, source_channel, payload, status,
-                attempts, resolve_attempts, claim_token, received_at`,
+                attempts, resolve_attempts, claim_token, received_at, origin`,
     [limit, visibilityMs, maxAttempts]
   );
   return rows;

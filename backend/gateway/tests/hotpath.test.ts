@@ -256,15 +256,16 @@ describe('I/O matrix — hot path', () => {
     expect(mockIntake.has('OEI2AK4Q16')).toBe(true);
   });
 
-  it('Postgres slow (insert beyond the ~150 ms deadline) → 503', async () => {
-    mockPg.delayMs = 400;
+  it('Postgres slow (insert beyond the hot-path deadline) → 503 at the deadline, not when the insert ends', async () => {
+    const deadline = Number(process.env.HOT_PATH_DEADLINE_MS); // 150 ms in production; generous in tests
+    mockPg.delayMs = deadline + 1_500;
     const t0 = Date.now();
     const res = await callback(null, C2B_RAW);
     expect(res.status).toBe(503);
-    expect(Date.now() - t0).toBeLessThan(380);
+    expect(Date.now() - t0).toBeLessThan(deadline + 1_000);
     mockPg.delayMs = 0;
-    await new Promise((r) => setTimeout(r, 450)); // let the late insert land
-  });
+    await new Promise((r) => setTimeout(r, 1_700)); // let the late insert land
+  }, 15_000);
 
   it('Redis down → falls through to the DB insert path, 200', async () => {
     mockRedis.down = true;
@@ -401,6 +402,15 @@ describe('/health/details observability', () => {
         return { rows: [{ pending: 3, processing: 1, oldest: 12.5, unresolved: 2, failed: 0, dead: 1 }], rowCount: 1 };
       }
       if (/AS awaiting/.test(text)) return { rows: [{ awaiting: 4, stalled: 2 }], rowCount: 1 };
+      if (/AS paid_unconfirmed/.test(text)) {
+        // spec gh-6-recon: only unconsumed requests are counted
+        expect(text).toContain('consumed_receipt IS NULL');
+        return { rows: [{ paid_unconfirmed: 2, exhausted: 1, overdue: 5, oldest: 1800, last_import: new Date('2026-10-09T08:00:00Z') }], rowCount: 1 };
+      }
+      if (/FROM reconciliation_exceptions WHERE resolved_at IS NULL/.test(text)) return { rows: [{ kind: 'CLAWBACK_DUE', n: 2 }], rowCount: 1 };
+      if (/FROM reconciliation_runs WHERE NOT dry_run ORDER BY started_at DESC/.test(text)) {
+        return { rows: [{ status: 'FAILED', started_at: new Date('2026-10-09T09:00:00Z'), finished_at: new Date('2026-10-09T09:01:00Z') }], rowCount: 1 };
+      }
       return { rows: [{ '?column?': 1 }], rowCount: 1 };
     });
     const res = await getJson('/health/details', await tokenFor('MERCHANT_ADMIN'));
@@ -408,7 +418,20 @@ describe('/health/details observability', () => {
     expect(res.body.queue).toMatchObject({ depth: 4, oldestPendingAgeSeconds: 12.5, dead: 1, unresolved: 2 });
     expect(res.body.awaitingSelfHeal).toBe(4);
     expect(res.body.stalledQuarantines).toBe(2);
-    expect(res.body.workers).toEqual({ settlement: false, rescore: false });
+    expect(res.body.workers).toEqual({ settlement: false, rescore: false, reconcile: false });
+    // spec gh-6-recon: the "state limbo" register
+    expect(res.body.reconciliation).toMatchObject({
+      enabled: false,
+      paidUnconfirmed: 2,
+      reconcileExhausted: 1,
+      overdueAccepted: 5,
+      oldestOverdueAcceptedAgeSeconds: 1800,
+      lastImportAt: '2026-10-09T08:00:00.000Z',
+      latestImport: { status: 'FAILED', startedAt: '2026-10-09T09:00:00.000Z', finishedAt: '2026-10-09T09:01:00.000Z' },
+      openExceptions: { CLAWBACK_DUE: 2 },
+      lastSweepAt: null,
+      sweepCounters: expect.objectContaining({ paid: 0, failed: 0, exhausted: 0 }),
+    });
     expect(res.body.circuitBreaker.state).toBe('CLOSED');
     expect(res.body.ml).toMatchObject({ timeoutMs: 500, timeoutRate: 0 });
     expect(res.body).toHaveProperty('spoolDepth');

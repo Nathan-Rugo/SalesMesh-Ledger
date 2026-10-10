@@ -137,7 +137,7 @@ beforeEach(() => {
   m(intake.markRetry).mockResolvedValue(true);
   m(intake.markFailed).mockResolvedValue(true);
   m(intake.markUnresolved).mockResolvedValue({ updated: true, terminal: false });
-  m(security.hasPayloadMutation).mockResolvedValue(false);
+  m(security.hasSecurityHold).mockResolvedValue(false);
   m(txns.fetchHistory).mockResolvedValue({ rows: [], truncated: false });
 });
 
@@ -244,7 +244,7 @@ describe('ML outcome → escrow (fail closed)', () => {
   });
 
   it('a recorded payload mutation forces QUARANTINED even on a model CLEAR', async () => {
-    m(security.hasPayloadMutation).mockResolvedValue(true);
+    m(security.hasSecurityHold).mockResolvedValue(true);
     await worker().process(c2bRow());
     expect(fakeEscrow.processSettlement.mock.calls[0][3]).toMatchObject({ securityHold: true });
     expect(await fakeEscrow.processSettlement.mock.results[0].value).toMatchObject({ escrowStatus: 'QUARANTINED' });
@@ -645,5 +645,90 @@ describe('STK fallback match (spec gh-5: CheckoutRequestID not on file)', () => 
     expect(await worker().process(stkRow(1500))).toBe('unresolved');
     expect(m(intake.markUnresolved).mock.calls[0][3]).toContain('stk_status_conflict_failed');
     expect(m(intake.markUnresolved).mock.calls[0][4]).toMatchObject({ terminal: true });
+  });
+});
+
+describe('RECONCILED rows (spec gh-6-recon: statement-recovered payments)', () => {
+  const STK_ID = '0b8a4c56-6f0e-4b8e-9d4c-2a1f3e5d7c90';
+  const actual = jest.requireActual('../src/repositories/stk.repository');
+  beforeAll(() => {
+    // Automocked arrays are empty: restore the real bindable-status list.
+    const list = stkRepo.RECONCILE_BINDABLE as unknown as string[];
+    if (list.length === 0) list.push(...actual.RECONCILE_BINDABLE);
+  });
+  beforeEach(() => {
+    m(agents.findStkRequestById).mockResolvedValue({ stkRequestId: STK_ID, agentId: 'agent-rec', amountCents: 150000, status: 'PAID_UNCONFIRMED', consumedReceipt: null });
+    m(stkRepo.lockReconciledStk).mockResolvedValue('ok');
+  });
+
+  function reconciledStk(over: Record<string, unknown> = {}): IntakeRow {
+    return {
+      ...c2bRow(),
+      mpesa_receipt_id: 'SJA1000001',
+      source_channel: 'DARAJA_STK',
+      origin: 'RECONCILED',
+      payload: {
+        Body: { stkCallback: { ResultCode: 0, CallbackMetadata: { Item: [
+          { Name: 'Amount', Value: '1500.00' },
+          { Name: 'MpesaReceiptNumber', Value: 'SJA1000001' },
+          { Name: 'TransactionDate', Value: '20261009101530' },
+        ] } } },
+        Reconciliation: { stkRequestId: STK_ID, corroborated: true, ...over },
+      },
+    };
+  }
+
+  it('resolves by the bound stkRequestId (no CheckoutRequestID needed), re-checks FOR UPDATE, consumes, settles', async () => {
+    expect(await worker().process(reconciledStk())).toBe('settled');
+    expect(agents.findStkRequestById).toHaveBeenCalledWith(fakePool, STK_ID);
+    expect(agents.findStkRequest).not.toHaveBeenCalled();
+    expect(stkRepo.lockReconciledStk).toHaveBeenCalledWith(expect.anything(), STK_ID, 'SJA1000001');
+    expect(agents.consumeStkRequest).toHaveBeenCalledWith(expect.anything(), STK_ID, 'SJA1000001');
+    expect(fakeEscrow.persistTransaction.mock.calls[0][0]).toMatchObject({ agent_id: 'agent-rec', source_channel: 'DARAJA_STK' });
+    // Payment time = the statement's Completion Time (EAT → UTC), not the import time.
+    expect(fakeEscrow.persistTransaction.mock.calls[0][0].timestamp.toISOString()).toBe('2026-10-09T07:15:30.000Z');
+    expect(risk.evaluate).toHaveBeenCalledTimes(1); // never bypasses ML scoring
+  });
+
+  it('a FAILED request → stk_status_conflict_failed (terminal UNRESOLVED) + STK_STATUS_CONFLICT, never settled', async () => {
+    m(agents.findStkRequestById).mockResolvedValue({ stkRequestId: STK_ID, agentId: 'a', amountCents: 150000, status: 'FAILED', consumedReceipt: null });
+    expect(await worker().process(reconciledStk())).toBe('unresolved');
+    expect(security.insertSecurityEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ type: 'STK_STATUS_CONFLICT', stkRequestId: STK_ID }));
+    expect(m(intake.markUnresolved).mock.calls[0][3]).toContain('stk_status_conflict_failed');
+    expect(m(intake.markUnresolved).mock.calls[0][4]).toMatchObject({ terminal: true });
+    expect(fakeEscrow.persistTransaction).not.toHaveBeenCalled();
+  });
+
+  it('status changed under the row lock (e.g. a late failure callback) → rolled back, UNRESOLVED for review', async () => {
+    m(stkRepo.lockReconciledStk).mockResolvedValue('status_changed');
+    expect(await worker().process(reconciledStk())).toBe('unresolved');
+    expect(m(intake.markUnresolved).mock.calls[0][3]).toContain('stk_status_conflict_reconciled');
+    expect(clientQuery).toHaveBeenCalledWith('ROLLBACK');
+  });
+
+  it('request consumed by another receipt → replay alarm; missing request → terminal', async () => {
+    m(agents.findStkRequestById).mockResolvedValue({ stkRequestId: STK_ID, agentId: 'a', amountCents: 150000, status: 'ACCEPTED', consumedReceipt: 'OTHER00001' });
+    expect(await worker().process(reconciledStk())).toBe('unresolved');
+    expect(security.insertSecurityEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ type: 'STK_RECEIPT_REPLAY' }));
+    m(agents.findStkRequestById).mockResolvedValue(null);
+    expect(await worker().process(reconciledStk())).toBe('unresolved');
+    expect(m(intake.markUnresolved).mock.calls[1][3]).toContain('reconciled_stk_request_missing');
+  });
+
+  it('an unbound (C2B-shaped) RECONCILED row resolves by agent code like any C2B payment', async () => {
+    expect(await worker().process({ ...c2bRow(), origin: 'RECONCILED' })).toBe('settled');
+    expect(agents.findAgentByCode).toHaveBeenCalledWith(fakePool, 'AG042');
+    expect(agents.findStkRequestById).not.toHaveBeenCalled();
+  });
+});
+
+describe('STK status conflict alarm (review fix)', () => {
+  it('a genuine paid callback for a request the sweep marked FAILED → UNRESOLVED + STK_STATUS_CONFLICT (one per request)', async () => {
+    m(agents.findStkRequest).mockResolvedValue({ stkRequestId: 'stk-9', agentId: 'a', amountCents: 150000, status: 'FAILED', consumedReceipt: null });
+    expect(await worker().process(stkRow(1500))).toBe('unresolved');
+    expect(security.insertSecurityEvent).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ type: 'STK_STATUS_CONFLICT', stkRequestId: 'stk-9', receipt: 'NLJ7RT61SV' })
+    );
   });
 });

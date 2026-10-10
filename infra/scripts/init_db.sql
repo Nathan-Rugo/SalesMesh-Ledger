@@ -1,7 +1,8 @@
 -- SalesMesh Physical Database DDL Schema (fresh install)
 -- Aligned with Chapter 4 Data Dictionary (Tables 4.6 - 4.17), plus the settlement-pipeline
--- tables (mpesa_callbacks, stk_requests, security_events) from spec gh-6, and the auth / STK
--- initiation tables (user_credentials, refresh_tokens, auth_events) from spec gh-5.
+-- tables (mpesa_callbacks, stk_requests, security_events) from spec gh-6, the auth / STK
+-- initiation tables (user_credentials, refresh_tokens, auth_events) from spec gh-5, and the Daraja
+-- reconciliation tables (reconciliation_runs, reconciliation_exceptions) from spec gh-6-recon.
 --
 -- Existing databases are brought to this shape by infra/scripts/migrations/*.sql; a fresh
 -- install records those migrations as already applied (see schema_migrations at the end).
@@ -102,6 +103,30 @@ CREATE TABLE IF NOT EXISTS sales_agents (
         CONSTRAINT sales_agents_agent_code_length CHECK (char_length(agent_code) <= 12)
 );
 
+-- Statement imports (spec gh-6-recon): one row per reconcile:import invocation (dry runs too).
+-- The same file (SHA-256) resumes after FAILED and is a recorded no-op after COMPLETED.
+CREATE TABLE IF NOT EXISTS reconciliation_runs (
+    run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    file_sha256 VARCHAR(64) NOT NULL,
+    file_name VARCHAR(255),
+    operator_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE RESTRICT,  -- an active MERCHANT_ADMIN
+    dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+    status VARCHAR(12) NOT NULL DEFAULT 'RUNNING' CHECK (status IN ('RUNNING', 'COMPLETED', 'FAILED')),
+    short_code VARCHAR(20),
+    account VARCHAR(100),
+    period_start TIMESTAMPTZ,
+    period_end TIMESTAMPTZ,
+    rows_total INTEGER NOT NULL DEFAULT 0,
+    rows_new INTEGER NOT NULL DEFAULT 0,
+    counts JSONB NOT NULL DEFAULT '{}'::jsonb,
+    noop_of_run_id UUID,                             -- re-import of a file already COMPLETED by that run
+    evidence_path TEXT,                              -- copy of the original file (directory named by its SHA)
+    error TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS reconciliation_runs_sha_idx ON reconciliation_runs (file_sha256, status);
+
 -- Intake: every non-duplicate Daraja callback, persisted (redacted) before the ACK.
 CREATE TABLE IF NOT EXISTS mpesa_callbacks (
     callback_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -120,7 +145,14 @@ CREATE TABLE IF NOT EXISTS mpesa_callbacks (
     last_error TEXT,
     received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    transaction_id UUID
+    transaction_id UUID,
+    -- Reconciliation (spec gh-6-recon): RECONCILED rows are synthesised from an M-Pesa statement.
+    origin VARCHAR(12) NOT NULL DEFAULT 'CALLBACK' CHECK (origin IN ('CALLBACK', 'RECONCILED')),
+    reconciliation_run_id UUID REFERENCES reconciliation_runs(run_id) ON DELETE RESTRICT,
+    checkout_request_id VARCHAR(100),                -- STK CheckoutRequestID (indexed: no JSONB scans)
+    stk_request_id UUID,                             -- RECONCILED: the STK request the statement row was bound to
+    confirmed_by_callback_at TIMESTAMPTZ,            -- RECONCILED: the genuine callback arrived later and matched
+    confirmed_hash VARCHAR(80)                       -- ... and its keyed hash (later deliveries compare against it)
 );
 CREATE INDEX IF NOT EXISTS mpesa_callbacks_ready_idx
     ON mpesa_callbacks (next_attempt_at, received_at) WHERE status IN ('PENDING', 'UNRESOLVED');
@@ -128,6 +160,10 @@ CREATE INDEX IF NOT EXISTS mpesa_callbacks_processing_idx
     ON mpesa_callbacks (claimed_at) WHERE status = 'PROCESSING';
 CREATE INDEX IF NOT EXISTS mpesa_callbacks_open_idx
     ON mpesa_callbacks (status, received_at) WHERE status <> 'SETTLED';
+CREATE INDEX IF NOT EXISTS mpesa_callbacks_checkout_idx
+    ON mpesa_callbacks (checkout_request_id) WHERE checkout_request_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS mpesa_callbacks_stk_request_idx
+    ON mpesa_callbacks (stk_request_id) WHERE stk_request_id IS NOT NULL;
 
 -- STK Push requests initiated by agents (spec gh-5). The row is written PENDING *before* Daraja is
 -- called, so a lost Daraja response becomes UNKNOWN (never "did not happen") and its callback can
@@ -138,11 +174,15 @@ CREATE TABLE IF NOT EXISTS stk_requests (
     merchant_request_id VARCHAR(100),
     agent_id UUID NOT NULL REFERENCES sales_agents(agent_id) ON DELETE RESTRICT,
     amount DECIMAL(12,2) NOT NULL CHECK (amount > 0),
-    status VARCHAR(12) NOT NULL DEFAULT 'PENDING'                 -- EXPIRED: UNKNOWN / stale PENDING past STK_TTL + 10 min
-        CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED', 'UNKNOWN', 'FAILED', 'EXPIRED')),
+    -- EXPIRED: UNKNOWN / stale PENDING past STK_TTL + 10 min. PAID_UNCONFIRMED: the STK Query sweep
+    -- says it was paid but no callback (receipt) arrived. RECONCILE_EXHAUSTED: the sweep gave up.
+    status VARCHAR(20) NOT NULL DEFAULT 'PENDING'
+        CONSTRAINT stk_requests_status_check CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED', 'UNKNOWN', 'FAILED',
+                                                               'EXPIRED', 'PAID_UNCONFIRMED', 'RECONCILE_EXHAUSTED')),
     idempotency_key VARCHAR(100),
     request_fingerprint VARCHAR(80),                 -- keyed HMAC of (phone, amount)
     phone_hash VARCHAR(80),                          -- counterparty HMAC of the customer MSISDN
+    phone_mask_hash VARCHAR(80),                     -- HMAC of the visible prefix/suffix (masked statement phones)
     account_reference VARCHAR(12),
     response_code VARCHAR(40),                       -- Daraja ResponseCode / errorCode
     result_code VARCHAR(20),                         -- callback ResultCode of a failed push (1032, 1037, ...)
@@ -154,11 +194,23 @@ CREATE TABLE IF NOT EXISTS stk_requests (
     consumed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- STK Query reconciliation sweep (spec gh-6-recon): fenced lease, backoff, attempt cap.
+    reconcile_attempts INTEGER NOT NULL DEFAULT 0,
+    next_reconcile_at TIMESTAMPTZ,
+    reconcile_claimed_at TIMESTAMPTZ,
+    reconcile_claim_token UUID,
+    last_query_result TEXT,                          -- evidence: the last STK Query answer (codes, never PII)
+    last_queried_at TIMESTAMPTZ,
     CONSTRAINT stk_requests_agent_idempotency_key UNIQUE (agent_id, idempotency_key),
-    CONSTRAINT stk_requests_accepted_has_checkout CHECK (status <> 'ACCEPTED' OR checkout_request_id IS NOT NULL)
+    CONSTRAINT stk_requests_accepted_has_checkout
+        CHECK (status NOT IN ('ACCEPTED', 'PAID_UNCONFIRMED') OR checkout_request_id IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS stk_requests_fallback_idx ON stk_requests (phone_hash, amount, created_at);
 CREATE INDEX IF NOT EXISTS stk_requests_open_idx ON stk_requests (created_at) WHERE status IN ('PENDING', 'UNKNOWN');
+CREATE INDEX IF NOT EXISTS stk_requests_reconcile_idx
+    ON stk_requests (created_at) WHERE status = 'ACCEPTED' AND consumed_receipt IS NULL;
+CREATE INDEX IF NOT EXISTS stk_requests_bind_idx
+    ON stk_requests (agent_id, amount, created_at) WHERE consumed_receipt IS NULL;
 
 -- Failed STK callbacks (ResultCode != 0) whose CheckoutRequestID is not on file yet (the callback
 -- raced ahead of recording Daraja's answer): applied when that answer is recorded.
@@ -173,13 +225,17 @@ CREATE TABLE IF NOT EXISTS stk_failed_callbacks (
 -- STK replay, cross-channel echo) or a user / refresh family (token reuse, lockout, PIN change).
 CREATE TABLE IF NOT EXISTS security_events (
     event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    event_type VARCHAR(40) NOT NULL CHECK (event_type IN (
+    event_type VARCHAR(40) NOT NULL
+        CONSTRAINT security_events_event_type_check CHECK (event_type IN (
         'PAYLOAD_MUTATION', 'STK_RECEIPT_REPLAY', 'STK_CHANNEL_ECHO',
         'REFRESH_TOKEN_REUSE', 'LOGIN_LOCKOUT', 'PIN_CHANGED',
-        'ADMIN_UNLOCK', 'ADMIN_DISABLE', 'ADMIN_PIN_RESET')),
+        'ADMIN_UNLOCK', 'ADMIN_DISABLE', 'ADMIN_PIN_RESET',
+        'RECONCILE_AMOUNT_MISMATCH', 'PAYMENT_REVERSED', 'RECONCILED_CALLBACK_LATE',
+        'RECONCILE_ATTRIBUTION_CONFLICT', 'RECONCILE_NOT_ON_STATEMENT', 'STK_STATUS_CONFLICT')),
     mpesa_receipt_id VARCHAR(50),
     subject_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
     family_id UUID,
+    stk_request_id UUID,                             -- STK_STATUS_CONFLICT: the request whose status is contradicted
     original_hash VARCHAR(80),
     incoming_hash VARCHAR(80) NOT NULL DEFAULT '',
     detail TEXT,
@@ -189,6 +245,8 @@ CREATE TABLE IF NOT EXISTS security_events (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS security_events_family_dedup
     ON security_events (event_type, family_id) WHERE family_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS security_events_stk_dedup
+    ON security_events (event_type, stk_request_id) WHERE stk_request_id IS NOT NULL;
 
 -- Table 5: TRANSACTIONS
 CREATE TABLE IF NOT EXISTS transactions (
@@ -204,6 +262,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()   -- re-score history is cut at the INITIAL evaluation
 );
 CREATE INDEX IF NOT EXISTS transactions_agent_time_idx ON transactions (agent_id, timestamp);
+-- Two-way reconciliation: callback-origin receipts inside a statement's Time Period.
+CREATE INDEX IF NOT EXISTS transactions_time_idx ON transactions (timestamp);
 
 -- Table 6: VERIFICATION_EVENTS (append-only: one INITIAL per transaction, then RESCOREs)
 CREATE TABLE IF NOT EXISTS verification_events (
@@ -256,6 +316,23 @@ CREATE TABLE IF NOT EXISTS escrow_accounts (
 CREATE INDEX IF NOT EXISTS escrow_accounts_rescore_idx
     ON escrow_accounts (next_rescore_at) WHERE escrow_status = 'QUARANTINED' AND NOT security_hold;
 
+-- Reconciliation exceptions an operator must act on (spec gh-6-recon): a reversal of a payment whose
+-- escrow was already RELEASED (CLAWBACK_DUE), or a RELEASED payment missing from the statement.
+-- Nothing is ever paid out or clawed back automatically.
+CREATE TABLE IF NOT EXISTS reconciliation_exceptions (
+    exception_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    kind VARCHAR(30) NOT NULL CHECK (kind IN ('CLAWBACK_DUE', 'RELEASED_NOT_ON_STATEMENT')),
+    mpesa_receipt_id VARCHAR(50) NOT NULL,
+    related_receipt_id VARCHAR(50) NOT NULL DEFAULT '', -- the reversal's own receipt ('' when none)
+    run_id UUID REFERENCES reconciliation_runs(run_id) ON DELETE RESTRICT,
+    escrow_id UUID REFERENCES escrow_accounts(escrow_id) ON DELETE RESTRICT,
+    amount DECIMAL(12,2),
+    detail TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ,
+    CONSTRAINT reconciliation_exceptions_dedup UNIQUE (kind, mpesa_receipt_id, related_receipt_id)
+);
+
 -- Table 9: LEDGER_ENTRIES
 CREATE TABLE IF NOT EXISTS ledger_entries (
     ledger_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -293,5 +370,5 @@ CREATE TABLE IF NOT EXISTS payout_disbursements (
 );
 
 -- A fresh install already has every migration's shape.
-INSERT INTO schema_migrations (version) VALUES ('001_settlement_pipeline'), ('002_auth_stk_initiation')
+INSERT INTO schema_migrations (version) VALUES ('001_settlement_pipeline'), ('002_auth_stk_initiation'), ('003_reconciliation')
     ON CONFLICT (version) DO NOTHING;

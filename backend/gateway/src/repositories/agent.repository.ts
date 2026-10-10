@@ -56,6 +56,54 @@ export async function findStkRequest(db: Db, checkoutRequestId: string): Promise
   return { stkRequestId: r.stk_request_id, agentId: r.agent_id, amountCents, status: r.status, consumedReceipt: r.consumed_receipt };
 }
 
+/** An STK request with what attributes it: its agent's code and the customer phone hashes. */
+export interface StkAttribution {
+  stkRequestId: string;
+  status: StkStatus;
+  consumedReceipt: string | null;
+  checkoutRequestId: string | null;
+  agentCode: string | null;
+  phoneHash: string | null;
+  phoneMaskHash: string | null;
+}
+
+/** By CheckoutRequestID or by stk_request_id (late-callback attribution check, spec gh-6-recon). */
+export async function findStkAttribution(db: Db, by: { checkoutRequestId: string } | { stkRequestId: string }): Promise<StkAttribution | null> {
+  const [col, value] = 'checkoutRequestId' in by ? ['checkout_request_id', by.checkoutRequestId] : ['stk_request_id', by.stkRequestId];
+  const { rows } = await db.query(
+    `SELECT s.stk_request_id, s.status, s.consumed_receipt, s.checkout_request_id, s.phone_hash, s.phone_mask_hash, a.agent_code
+       FROM stk_requests s JOIN sales_agents a ON a.agent_id = s.agent_id
+      WHERE s.${col} = $1`,
+    [value]
+  );
+  const r = rows[0];
+  return r
+    ? {
+        stkRequestId: r.stk_request_id,
+        status: r.status,
+        consumedReceipt: r.consumed_receipt,
+        checkoutRequestId: r.checkout_request_id,
+        agentCode: r.agent_code,
+        phoneHash: r.phone_hash,
+        phoneMaskHash: r.phone_mask_hash,
+      }
+    : null;
+}
+
+/** The STK request a statement-recovered (RECONCILED) intake row was bound to, by its id. */
+export async function findStkRequestById(db: Db, stkRequestId: string): Promise<StkRequest | null> {
+  const { rows } = await db.query<{ stk_request_id: string; agent_id: string; amount: string; status: StkStatus; consumed_receipt: string | null }>(
+    `SELECT stk_request_id, agent_id, amount::text AS amount, status, consumed_receipt
+       FROM stk_requests WHERE stk_request_id = $1`,
+    [stkRequestId]
+  );
+  const r = rows[0];
+  if (!r) return null;
+  const amountCents = toCents(r.amount);
+  if (amountCents === null) throw new Error(`stk_requests amount for ${stkRequestId} is not a valid amount`);
+  return { stkRequestId: r.stk_request_id, agentId: r.agent_id, amountCents, status: r.status, consumedReceipt: r.consumed_receipt };
+}
+
 /**
  * Binds the receipt to the STK request (UNIQUE consumed_receipt), by stk_request_id so that a
  * fallback-bound request is consumed the same way. Idempotent for the same receipt; false when a

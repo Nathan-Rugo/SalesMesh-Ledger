@@ -8,6 +8,11 @@
  * transaction (fenced on the claim token): bind the STK request, upsert the transaction, append
  * the INITIAL verification event, create the escrow hold, mark the callback SETTLED.
  *
+ * Reconciliation (spec gh-6-recon): a RECONCILED row (synthesised from an M-Pesa statement) that
+ * was bound to an STK request carries that request's id; it resolves by that id (never by a
+ * fabricated CheckoutRequestID), and the settlement transaction re-checks the request's status and
+ * consumption FOR UPDATE. Unbound RECONCILED rows are C2B-shaped and resolve by agent code.
+ *
  * Every step is idempotent (ON CONFLICT everywhere), so a crash at any point is recovered by
  * reclaiming the row after the visibility timeout. Fail closed: anything not explicitly
  * model-CLEARed is QUARANTINED; unresolvable callbacks never create transactions.
@@ -29,8 +34,15 @@ import {
   type ParsedCallback,
 } from '../domain/callback';
 import { buildRawRequest } from '../domain/risk_request';
-import { consumeStkRequest, findAgentByCode, findStkRequest } from '../repositories/agent.repository';
-import { bindFallback, expireOpenRequests, expireStalePending, findFallbackCandidates } from '../repositories/stk.repository';
+import { consumeStkRequest, findAgentByCode, findStkRequest, findStkRequestById } from '../repositories/agent.repository';
+import {
+  bindFallback,
+  expireOpenRequests,
+  expireStalePending,
+  findFallbackCandidates,
+  lockReconciledStk,
+  RECONCILE_BINDABLE,
+} from '../repositories/stk.repository';
 import { purgeAuthData } from '../repositories/auth.repository';
 import { paymentsConfig, STK_EXPIRE_AFTER_MS } from '../config/stk';
 import { Rollback, withTransaction, type TxDb } from '../repositories/db.types';
@@ -47,7 +59,7 @@ import {
   sweepDead,
   type IntakeRow,
 } from '../repositories/intake.repository';
-import { hasPayloadMutation, insertSecurityEvent, recordChannelEcho, recordPayloadMutation } from '../repositories/security.repository';
+import { hasSecurityHold, insertSecurityEvent, recordChannelEcho, recordPayloadMutation } from '../repositories/security.repository';
 import { fetchHistory } from '../repositories/transaction.repository';
 import { EscrowService, escrowService } from '../services/escrow.service';
 import { resilientRiskClient, type ResilientRiskClient } from '../services/risk_client.service';
@@ -59,11 +71,19 @@ export type Outcome = 'settled' | 'unresolved' | 'failed' | 'retry' | 'lease_los
 interface StkBinding {
   stkRequestId: string;
   fallback: { phoneHashes: string[]; amount: string; at: Date; checkoutRequestId: string } | null;
+  /** RECONCILED row bound by id: re-check status and consumption FOR UPDATE before consuming. */
+  recheck?: boolean;
+}
+
+/** The STK request id a RECONCILED intake row was bound to by the statement import, or null. */
+export function reconciledStkRequestId(payload: unknown): string | null {
+  const id = (payload as any)?.Reconciliation?.stkRequestId;
+  return typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id) ? id : null;
 }
 
 type Resolution =
   | { kind: 'resolved'; agentId: string; stk: StkBinding | null }
-  | { kind: 'unresolved'; reason: string; terminal: boolean; replay?: boolean };
+  | { kind: 'unresolved'; reason: string; terminal: boolean; replay?: boolean; statusConflictOf?: string };
 
 export interface SettlementWorkerDeps {
   pool?: TxDb;
@@ -219,7 +239,10 @@ export class SettlementWorker {
     }
 
     try {
-      const resolution = await this.resolveAgent(parsed, new Date(row.received_at));
+      const resolution =
+        row.origin === 'RECONCILED' && (parsed.channel === 'DARAJA_STK' || reconciledStkRequestId(row.payload))
+          ? await this.resolveReconciled(parsed, reconciledStkRequestId(row.payload))
+          : await this.resolveAgent(parsed, new Date(row.received_at));
       if (resolution.kind === 'unresolved') return await this.unresolved(row, resolution);
 
       const at = effectivePaymentTime(parsed.paymentTime, new Date(row.received_at));
@@ -246,6 +269,11 @@ export class SettlementWorker {
         const settled = await withTransaction(this.pool, async (client: PoolClient) => {
           if (!(await lockClaimed(client, row.callback_id, row.claim_token))) throw new Rollback('lease_lost');
           const stk = resolution.stk;
+          if (stk?.recheck) {
+            const state = await lockReconciledStk(client, stk.stkRequestId, receipt);
+            if (state === 'replay') throw new Rollback('stk_receipt_replay');
+            if (state !== 'ok') throw new Rollback('stk_status_changed');
+          }
           if (stk) {
             // Fallback: re-select FOR UPDATE, re-count, bind only if still exactly this UNKNOWN row.
             if (stk.fallback && !(await bindFallback(client, { ...stk.fallback, stkRequestId: stk.stkRequestId }))) {
@@ -253,7 +281,7 @@ export class SettlementWorker {
             }
             if (!(await consumeStkRequest(client, stk.stkRequestId, receipt))) throw new Rollback('stk_receipt_replay');
           }
-          const securityHold = await hasPayloadMutation(client, receipt);
+          const securityHold = await hasSecurityHold(client, receipt);
           const transactionId = await this.escrow.persistTransaction(
             {
               agent_id: resolution.agentId,
@@ -291,6 +319,9 @@ export class SettlementWorker {
         if ((error instanceof Rollback && error.value === 'stk_receipt_replay') || isUniqueViolation(error, 'stk_requests_consumed_receipt_key')) {
           return await this.unresolved(row, { kind: 'unresolved', reason: 'stk_receipt_replay', terminal: true, replay: true });
         }
+        if (error instanceof Rollback && error.value === 'stk_status_changed') {
+          return await this.unresolved(row, { kind: 'unresolved', reason: 'stk_status_conflict_reconciled', terminal: true, statusConflictOf: resolution.stk?.stkRequestId });
+        }
         if ((error instanceof Rollback && error.value === 'stk_fallback_contended') || isUniqueViolation(error, 'stk_requests_checkout_request_id_key')) {
           // The candidate set changed under us: resolve afresh on the next attempt (fail closed now).
           return await this.unresolved(row, { kind: 'unresolved', reason: 'stk_fallback_contended', terminal: false });
@@ -313,7 +344,7 @@ export class SettlementWorker {
         }
         // A paid callback for a request recorded as rejected/failed is contradictory: review it.
         if (stk.status === 'REJECTED' || stk.status === 'FAILED') {
-          return { kind: 'unresolved', reason: `stk_status_conflict_${stk.status.toLowerCase()}`, terminal: true };
+          return { kind: 'unresolved', reason: `stk_status_conflict_${stk.status.toLowerCase()}`, terminal: true, statusConflictOf: stk.stkRequestId };
         }
         return { kind: 'resolved', agentId: stk.agentId, stk: { stkRequestId: stk.stkRequestId, fallback: null } };
       }
@@ -324,6 +355,24 @@ export class SettlementWorker {
     const agentId = await findAgentByCode(this.pool, code);
     if (!agentId) return { kind: 'unresolved', reason: 'c2b_unknown_agent_code', terminal: false };
     return { kind: 'resolved', agentId, stk: null };
+  }
+
+  /**
+   * A statement-recovered STK payment: resolved by the STK request id the import bound it to.
+   * A FAILED / REJECTED request is a status conflict (review, never C2B-shaped).
+   */
+  private async resolveReconciled(parsed: ParsedCallback, stkRequestId: string | null): Promise<Resolution> {
+    if (!stkRequestId) return { kind: 'unresolved', reason: 'reconciled_stk_without_request', terminal: true };
+    const stk = await findStkRequestById(this.pool, stkRequestId);
+    if (!stk) return { kind: 'unresolved', reason: 'reconciled_stk_request_missing', terminal: true };
+    if (stk.amountCents !== parsed.amountCents) return { kind: 'unresolved', reason: 'stk_amount_mismatch', terminal: true };
+    if (stk.consumedReceipt && stk.consumedReceipt !== parsed.receipt) {
+      return { kind: 'unresolved', reason: 'stk_receipt_replay', terminal: true, replay: true };
+    }
+    if (!RECONCILE_BINDABLE.includes(stk.status)) {
+      return { kind: 'unresolved', reason: `stk_status_conflict_${stk.status.toLowerCase()}`, terminal: true, statusConflictOf: stk.stkRequestId };
+    }
+    return { kind: 'resolved', agentId: stk.agentId, stk: { stkRequestId: stk.stkRequestId, fallback: null, recheck: true } };
   }
 
   /**
@@ -360,6 +409,17 @@ export class SettlementWorker {
   }
 
   private async unresolved(row: IntakeRow, r: Extract<Resolution, { kind: 'unresolved' }>): Promise<Outcome> {
+    if (r.statusConflictOf) {
+      // A paid payment for a request recorded FAILED / REJECTED (e.g. by the STK Query sweep): alarm, one per request.
+      await insertSecurityEvent(this.pool, {
+        type: 'STK_STATUS_CONFLICT',
+        receipt: row.mpesa_receipt_id,
+        originalHash: null,
+        incomingHash: row.raw_payload_hash,
+        detail: `payment for an STK request recorded ${r.reason.replace('stk_status_conflict_', '').toUpperCase()}`,
+        stkRequestId: r.statusConflictOf,
+      });
+    }
     if (r.replay) {
       console.error(`[SECURITY ALARM] STK request already consumed by another receipt; ${row.mpesa_receipt_id} held UNRESOLVED`);
       await insertSecurityEvent(this.pool, {

@@ -1,10 +1,10 @@
 /**
- * Migrations 001 + 002 against real Postgres: legacy schema + 001 + 002 == fresh init schema,
+ * Migrations 001 + 002 + 003 against real Postgres: legacy schema + 001 + 002 + 003 == fresh init schema,
  * legacy rows are backfilled, and re-running (or running on a fresh install) is a no-op.
  */
 
 import type { Pool } from 'pg';
-import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, type TestDb } from './helpers';
+import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003, type TestDb } from './helpers';
 
 jest.setTimeout(60_000);
 
@@ -22,7 +22,7 @@ async function shape(pool: Pool) {
   return { cols: cols.rows, idx: idx.rows, cons: consSorted };
 }
 
-describeDb('migrations 001_settlement_pipeline + 002_auth_stk_initiation', () => {
+describeDb('migrations 001_settlement_pipeline + 002_auth_stk_initiation + 003_reconciliation', () => {
   let legacy: TestDb;
   let fresh: TestDb;
 
@@ -94,6 +94,20 @@ describeDb('migrations 001_settlement_pipeline + 002_auth_stk_initiation', () =>
     // Subject-generic security events (no receipt).
     await p.query(`INSERT INTO security_events (event_type, subject_user_id, detail) VALUES ('LOGIN_LOCKOUT', $1, 'x')`, [u.user_id]);
 
+    // 003: a pre-003 STK callback row gets its CheckoutRequestID copied out of the JSONB once.
+    await p.query(
+      `INSERT INTO mpesa_callbacks (mpesa_receipt_id, raw_payload_hash, source_channel, payload)
+       VALUES ('LEGACY0009', 'k1:x', 'DARAJA_STK', '{"Body":{"stkCallback":{"CheckoutRequestID":"ws_CO_legacy_cb","ResultCode":0}}}')`
+    );
+    await p.query(MIGRATION_003);
+    const { rows: [cb] } = await p.query(`SELECT origin, checkout_request_id FROM mpesa_callbacks WHERE mpesa_receipt_id = 'LEGACY0009'`);
+    expect(cb).toEqual({ origin: 'CALLBACK', checkout_request_id: 'ws_CO_legacy_cb' });
+    await p.query(`UPDATE stk_requests SET status = 'PAID_UNCONFIRMED'`); // new status, still has its checkout id
+    await expect(
+      p.query(`INSERT INTO stk_requests (agent_id, amount, status) VALUES ($1, 10, 'PAID_UNCONFIRMED')`, [a.agent_id])
+    ).rejects.toThrow(/stk_requests_accepted_has_checkout/);
+    await p.query(`INSERT INTO security_events (event_type, mpesa_receipt_id, detail) VALUES ('PAYMENT_REVERSED', 'LEGACY0001', 'x')`);
+
     const [a1, b1] = await Promise.all([shape(legacy.pool), shape(fresh.pool)]);
     expect(a1.cols).toEqual(b1.cols);
     expect(a1.idx).toEqual(b1.idx);
@@ -104,14 +118,16 @@ describeDb('migrations 001_settlement_pipeline + 002_auth_stk_initiation', () =>
     const before = await shape(legacy.pool);
     await legacy.pool.query(MIGRATION_001);
     await legacy.pool.query(MIGRATION_002);
+    await legacy.pool.query(MIGRATION_003);
     expect(await shape(legacy.pool)).toEqual(before);
 
     const freshBefore = await shape(fresh.pool);
     await fresh.pool.query(MIGRATION_001);
     await fresh.pool.query(MIGRATION_002);
+    await fresh.pool.query(MIGRATION_003);
     expect(await shape(fresh.pool)).toEqual(freshBefore);
     const { rows } = await fresh.pool.query(`SELECT version FROM schema_migrations ORDER BY version`);
-    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation']);
+    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation', '003_reconciliation']);
   });
 
   it('enforces the agent_code CHECK (upper-case, trimmed)', async () => {

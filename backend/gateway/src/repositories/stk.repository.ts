@@ -8,6 +8,11 @@
  * outcome being recorded is kept in stk_failed_callbacks and applied when it is. An UNKNOWN row is
  * bound to its callback by the settlement worker's fallback match (phone HMAC, amount, time
  * window); UNKNOWN / stale PENDING rows no callback can match any more become EXPIRED.
+ *
+ * Reconciliation (spec gh-6-recon): the STK Query sweep moves an overdue ACCEPTED request to
+ * PAID_UNCONFIRMED (paid, callback missing: waits for the statement's receipt), FAILED, or — when
+ * its attempts run out — RECONCILE_EXHAUSTED. A failure callback for a PAID_UNCONFIRMED request
+ * contradicts the query: it raises STK_STATUS_CONFLICT instead of changing (or parking) anything.
  */
 
 import { STK_TTL_MS, stkClockSkewMs } from '../config/stk';
@@ -15,7 +20,41 @@ import { withTransaction, type Db, type TxDb } from './db.types';
 
 export { STK_TTL_MS };
 
-export type StkStatus = 'PENDING' | 'ACCEPTED' | 'REJECTED' | 'UNKNOWN' | 'FAILED' | 'EXPIRED';
+export type StkStatus =
+  | 'PENDING'
+  | 'ACCEPTED'
+  | 'REJECTED'
+  | 'UNKNOWN'
+  | 'FAILED'
+  | 'EXPIRED'
+  | 'PAID_UNCONFIRMED'
+  | 'RECONCILE_EXHAUSTED';
+
+/**
+ * Statuses a statement-recovered payment may bind to and consume (spec gh-6-recon). Every other
+ * unconsumed status still counts toward ambiguity; FAILED / REJECTED matches are conflicts.
+ */
+export const RECONCILE_BINDABLE: readonly StkStatus[] = ['ACCEPTED', 'PAID_UNCONFIRMED', 'RECONCILE_EXHAUSTED', 'UNKNOWN', 'EXPIRED'];
+
+/**
+ * Inside the settlement transaction, for a RECONCILED intake row bound to `stkRequestId`: lock the
+ * request and re-check it is still bindable and unconsumed (or consumed by this very receipt).
+ */
+export async function lockReconciledStk(
+  db: Db,
+  stkRequestId: string,
+  receipt: string
+): Promise<'ok' | 'replay' | 'status_changed' | 'missing'> {
+  const { rows } = await db.query<{ status: StkStatus; consumed_receipt: string | null }>(
+    `SELECT status, consumed_receipt FROM stk_requests WHERE stk_request_id = $1 FOR UPDATE`,
+    [stkRequestId]
+  );
+  const r = rows[0];
+  if (!r) return 'missing';
+  if (r.consumed_receipt && r.consumed_receipt !== receipt) return 'replay';
+  if (!RECONCILE_BINDABLE.includes(r.status)) return 'status_changed';
+  return 'ok';
+}
 
 /** Serialises everything that touches one CheckoutRequestID (failure callback vs outcome recording). */
 const lockCheckout = (db: Db, checkoutRequestId: string) =>
@@ -63,16 +102,19 @@ export interface NewStkRequest {
   phoneHash: string;
   amount: number;
   accountReference: string;
+  /** Masked-phone fingerprint (visible prefix/suffix): lets a masked statement phone corroborate it. */
+  phoneMaskHash?: string | null;
 }
 
 /** Claims the (agent, Idempotency-Key) pair by inserting a PENDING row; null when it already exists. */
 export async function claimStkRequest(db: Db, r: NewStkRequest): Promise<StkRow | null> {
   const { rows } = await db.query(
-    `INSERT INTO stk_requests (agent_id, idempotency_key, request_fingerprint, phone_hash, amount, account_reference, status, claimed_at)
-     VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', NOW())
+    `INSERT INTO stk_requests (agent_id, idempotency_key, request_fingerprint, phone_hash, amount, account_reference, status, claimed_at,
+                               phone_mask_hash)
+     VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', NOW(), $7)
      ON CONFLICT ON CONSTRAINT stk_requests_agent_idempotency_key DO NOTHING
      RETURNING ${COLUMNS}`,
-    [r.agentId, r.idempotencyKey, r.fingerprint, r.phoneHash, r.amount, r.accountReference]
+    [r.agentId, r.idempotencyKey, r.fingerprint, r.phoneHash, r.amount, r.accountReference, r.phoneMaskHash ?? null]
   );
   return rows[0] ? toRow(rows[0]) : null;
 }
@@ -170,9 +212,28 @@ export async function hasRecentDuplicate(
 export async function markStkFailed(db: TxDb, checkoutRequestId: string, resultCode: string, resultDesc: string): Promise<number> {
   return withTransaction(db, async (tx) => {
     await lockCheckout(tx, checkoutRequestId);
+    // The STK Query sweep said this request was paid: a failure callback contradicts it. Raise
+    // STK_STATUS_CONFLICT for review; the status stays PAID_UNCONFIRMED and nothing is parked.
+    const { rows: paid } = await tx.query<{ stk_request_id: string }>(
+      `SELECT stk_request_id FROM stk_requests
+        WHERE checkout_request_id = $1 AND status = 'PAID_UNCONFIRMED' AND consumed_receipt IS NULL
+        FOR UPDATE`,
+      [checkoutRequestId]
+    );
+    if (paid[0]?.stk_request_id) {
+      console.error(`[SECURITY ALARM] failure callback (ResultCode ${resultCode}) for an STK request the STK Query reported paid`);
+      await tx.query(
+        `INSERT INTO security_events (event_type, stk_request_id, incoming_hash, detail)
+         VALUES ('STK_STATUS_CONFLICT', $1, $2, $3)
+         ON CONFLICT DO NOTHING`,
+        [paid[0].stk_request_id, `result:${resultCode}`, `failure callback ResultCode ${resultCode} for a PAID_UNCONFIRMED request`]
+      );
+      return 1;
+    }
     const { rowCount } = await tx.query(
       `UPDATE stk_requests SET status = 'FAILED', result_code = $2, error = $3, updated_at = NOW()
-        WHERE checkout_request_id = $1 AND consumed_receipt IS NULL AND status IN ('ACCEPTED', 'UNKNOWN', 'PENDING', 'FAILED')`,
+        WHERE checkout_request_id = $1 AND consumed_receipt IS NULL
+          AND status IN ('ACCEPTED', 'UNKNOWN', 'PENDING', 'FAILED', 'RECONCILE_EXHAUSTED')`,
       [checkoutRequestId, resultCode, resultDesc || null]
     );
     if (!rowCount) {
@@ -195,7 +256,7 @@ export async function expireOpenRequests(db: Db, olderThanMs: number): Promise<n
   const { rowCount } = await db.query(
     `UPDATE stk_requests SET status = 'EXPIRED', updated_at = NOW(),
             error = COALESCE(error || ' | ', '') || 'expired: no callback matched'
-      WHERE status IN ('UNKNOWN', 'PENDING') AND checkout_request_id IS NULL
+      WHERE status IN ('UNKNOWN', 'PENDING') AND checkout_request_id IS NULL AND consumed_receipt IS NULL
         AND created_at < NOW() - make_interval(secs => $1::double precision / 1000)`,
     [olderThanMs]
   );

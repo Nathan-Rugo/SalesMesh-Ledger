@@ -302,3 +302,104 @@ export function parseStoredCallback(payload: unknown): ParsedCallback {
 export function counterpartyHash(parsed: Pick<ParsedCallback, 'counterpartyHash' | 'receipt'>): string {
   return parsed.counterpartyHash ?? receiptCounterpartyHash(parsed.receipt);
 }
+
+// ── Reconciliation helpers (spec gh-6-recon) ──────────────────────────────
+
+/** Visible digits a masked-phone fingerprint is made of: the 254-form prefix and the last digits. */
+export const MASK_PREFIX_DIGITS = 4;
+export const MASK_SUFFIX_DIGITS = 3;
+
+const maskInput = (prefix: string, suffix: string) => `mask:${prefix}|${suffix}`;
+
+/**
+ * The visible prefix/suffix of a masked phone ("2547****678", "07** *** 678", "2547XXXXX678"), the
+ * prefix normalised to the 254 form; null when it is not a masked phone or shows too few digits.
+ */
+export function maskedPhoneParts(raw: unknown): { prefix: string; suffix: string } | null {
+  const v = str(raw).replace(/[\s()-]/g, '');
+  const m = /^\+?(\d+)[*•xX]+(\d+)$/.exec(v);
+  if (!m) return null;
+  let prefix = m[1];
+  if (prefix.startsWith('0')) prefix = `254${prefix.slice(1)}`;
+  else if (/^[17]/.test(prefix)) prefix = `254${prefix}`;
+  if (!prefix.startsWith('254') || prefix.length < MASK_PREFIX_DIGITS || m[2].length < MASK_SUFFIX_DIGITS) return null;
+  return { prefix: prefix.slice(0, MASK_PREFIX_DIGITS), suffix: m[2].slice(-MASK_SUFFIX_DIGITS) };
+}
+
+/** Masked-phone fingerprint of a normalised MSISDN, stored at STK initiation (current key). */
+export function msisdnMaskHash(msisdn: string): string {
+  return keyedHash('phone_mask', maskInput(msisdn.slice(0, MASK_PREFIX_DIGITS), msisdn.slice(-MASK_SUFFIX_DIGITS)));
+}
+
+/** Every fingerprint (current and previous PII key) a masked statement phone can match. */
+export function maskHashCandidates(parts: { prefix: string; suffix: string }): string[] {
+  const input = maskInput(parts.prefix, parts.suffix);
+  return [keyedHash('phone_mask', input), ...alternateKeyedHashes('phone_mask', input)];
+}
+
+/** Every counterparty hash (current and previous PII key) a full, normalised MSISDN can match. */
+export function msisdnHashCandidates(msisdn: string): string[] {
+  return [normalisedMsisdnHash(msisdn), ...alternateKeyedHashes('counterparty', `msisdn:${msisdn}`)];
+}
+
+export type OtherParty = { kind: 'full'; msisdn: string } | { kind: 'masked'; prefix: string; suffix: string } | { kind: 'none' };
+
+/**
+ * Statement "Other Party Info" ("2547****678 - JOHN DOE", "254712345678 - JOHN DOE", "600000 - ACME"):
+ * the phone (full or masked), never the name — the name is dropped here and never stored.
+ */
+export function parseOtherParty(raw: unknown): OtherParty {
+  const value = str(raw);
+  if (!value) return { kind: 'none' };
+  // Up to the first " - NAME" separator, then the leading run of phone characters ending in a digit
+  // (internal spaces / hyphens allowed; a name with no separator stops it). Normalised whole.
+  const m = /^[+\d*•xX\s-]*\d/.exec(value.split(/\s+-\s+/)[0].trim());
+  if (!m) return { kind: 'none' };
+  const head = m[0].replace(/[\s-]/g, '');
+  const msisdn = normaliseKenyanMsisdn(head);
+  if (msisdn) return { kind: 'full', msisdn };
+  const masked = maskedPhoneParts(head);
+  return masked ? { kind: 'masked', ...masked } : { kind: 'none' };
+}
+
+/** JSON with object keys sorted at every level: the canonical bytes of a synthesised payload. */
+export function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v === undefined ? null : v)).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+/** The CheckoutRequestID of an STK callback body (raw or redacted), or null. */
+export function checkoutRequestIdOf(body: unknown): string | null {
+  const id = str((body as any)?.Body?.stkCallback?.CheckoutRequestID);
+  return id && id.length <= 100 ? id : null;
+}
+
+/** Identity fields of a raw (unredacted) callback, for comparing a late callback with a recovered row. */
+export function callbackIdentity(body: unknown): { checkoutRequestId: string | null; billRefNumber: string | null; phoneRaw: unknown } {
+  const b = body as any;
+  if (b?.Body?.stkCallback) {
+    return { checkoutRequestId: checkoutRequestIdOf(b), billRefNumber: null, phoneRaw: itemValue(stkItems(b.Body.stkCallback), 'PhoneNumber') };
+  }
+  return { checkoutRequestId: null, billRefNumber: str(b?.BillRefNumber) || null, phoneRaw: b?.MSISDN };
+}
+
+/** The normalised MSISDN of a plain (unmasked, not provider-hashed) phone value, else null. */
+export function plainMsisdn(raw: unknown): string | null {
+  const input = msisdnHashInput(raw);
+  return input?.startsWith('msisdn:') ? input.slice('msisdn:'.length) : null;
+}
+
+/**
+ * Does a stored phone hash belong to `msisdn`? `counterparty`: the full-phone HMAC; `phone_mask`:
+ * the masked-phone fingerprint. null when it cannot be told (made under a retired key).
+ */
+export function phoneHashVerdict(stored: string, domain: 'counterparty' | 'phone_mask', msisdn: string): boolean | null {
+  const input = domain === 'counterparty' ? `msisdn:${msisdn}` : maskInput(msisdn.slice(0, MASK_PREFIX_DIGITS), msisdn.slice(-MASK_SUFFIX_DIGITS));
+  return keyedHashMatches(stored, domain, input);
+}

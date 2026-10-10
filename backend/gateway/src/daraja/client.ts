@@ -13,6 +13,11 @@
  *  - Typed outcomes: ACCEPTED (CheckoutRequestID), REJECTED (definitive: the customer was not
  *    prompted), UNKNOWN (sent, but no definitive answer: timeout, connection lost, 5xx without a
  *    definitive errorCode). ResponseCode is compared as the string "0".
+ *  - stkQuery() (spec gh-6-recon): STK Push Query for the reconciliation sweep, under the same
+ *    overall-deadline discipline. A query never prompts the customer, so a token-invalid answer is
+ *    retried once after a refresh. Typed outcomes PAID / FAILED(code) / PENDING / UNKNOWN from an
+ *    explicit table keyed on (HTTP status, errorCode, errorMessage, ResultCode as a string);
+ *    unlisted codes are retried (UNKNOWN), never FAILED.
  *  - Never logs the customer MSISDN, the token, or any Daraja secret.
  */
 
@@ -327,6 +332,150 @@ export class DarajaClient {
       this.metrics.recordDarajaLatency(Date.now() - started);
     }
   }
+
+  /**
+   * STK Push Query for one CheckoutRequestID. Never throws. Bounded by one overall deadline
+   * (DARAJA_TOTAL_TIMEOUT_MS); a token-invalid answer is retried once after a refresh (a query
+   * never prompts the customer). `unreachable` marks answers that say Daraja itself is down.
+   */
+  async stkQuery(checkoutRequestId: string): Promise<StkQueryOutcome> {
+    let cfg: DarajaConfig;
+    try {
+      cfg = this.config();
+    } catch (error) {
+      return { kind: 'UNKNOWN', code: 'config', message: (error as Error).message, unreachable: true };
+    }
+    const deadline = Date.now() + cfg.totalTimeoutMs;
+    let token: string;
+    try {
+      token = await this.accessToken(false, deadline);
+    } catch (error) {
+      console.error('[Daraja] no OAuth token, STK Query not sent:', (error as Error).message);
+      return { kind: 'UNKNOWN', code: 'oauth_unavailable', message: 'Daraja authentication failed', unreachable: true };
+    }
+    for (let attempt = 0; ; attempt++) {
+      const budget = Math.min(cfg.timeoutMs, deadline - Date.now());
+      if (budget <= 0) return { kind: 'UNKNOWN', code: 'deadline', message: 'Daraja did not answer in time', unreachable: true };
+      const mapped = await this.postStkQuery(cfg, token, checkoutRequestId, budget);
+      if (mapped.kind !== 'TOKEN_INVALID') return mapped;
+      // Rejected again after a refresh: a credential / scope fault, not this request's — defer, refund.
+      if (attempt > 0) return { kind: 'UNKNOWN', code: mapped.code, message: 'Daraja rejected the access token', unreachable: true };
+      this.invalidateToken();
+      try {
+        token = await this.accessToken(true, deadline);
+      } catch (error) {
+        console.error('[Daraja] OAuth refresh failed, STK Query not sent:', (error as Error).message);
+        return { kind: 'UNKNOWN', code: 'oauth_unavailable', message: 'Daraja authentication failed', unreachable: true };
+      }
+    }
+  }
+
+  private async postStkQuery(cfg: DarajaConfig, token: string, checkoutRequestId: string, timeoutMs: number): Promise<QueryMapped> {
+    const { password, timestamp } = stkPassword(cfg.shortCode, cfg.passkey, new Date());
+    const body = { BusinessShortCode: Number(cfg.shortCode), Password: password, Timestamp: timestamp, CheckoutRequestID: checkoutRequestId };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const started = Date.now();
+    try {
+      let res: Awaited<ReturnType<FetchLike>>;
+      try {
+        res = await this.fetchImpl(`${cfg.baseUrl}/mpesa/stkpushquery/v1/query`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (controller.signal.aborted) return { kind: 'UNKNOWN', code: 'timeout', message: 'no answer from Daraja in time', unreachable: true };
+        const code = String((error as any)?.cause?.code ?? (error as any)?.code ?? '');
+        return { kind: 'UNKNOWN', code: code ? `network_${code}` : 'network_error', message: 'Daraja unreachable', unreachable: true };
+      }
+      let text: string;
+      try {
+        text = await res.text();
+      } catch {
+        return { kind: 'UNKNOWN', code: controller.signal.aborted ? 'timeout' : 'body_lost', message: 'Daraja response lost', unreachable: true };
+      }
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = null;
+      }
+      return mapStkQueryResponse(res.status, parsed, checkoutRequestId);
+    } finally {
+      clearTimeout(timer);
+      this.metrics.recordDarajaLatency(Date.now() - started);
+    }
+  }
+}
+
+// ── STK Push Query (reconciliation sweep, spec gh-6-recon) ─────────────────
+
+export type StkQueryOutcome =
+  /** Paid: ResponseCode "0", ResultCode "0" and the echoed CheckoutRequestID is ours. No receipt. */
+  | { kind: 'PAID'; resultCode: '0'; resultDesc: string }
+  /** Definitively not paid (cancelled, timed out, wrong PIN, insufficient funds, ...). */
+  | { kind: 'FAILED'; resultCode: string; resultDesc: string }
+  /** Still being processed, or throttled (`throttled`: does not consume a sweep attempt). */
+  | { kind: 'PENDING'; code: string; message: string; throttled?: boolean }
+  /** No definitive answer (network, timeout, 5xx, unlisted code, mismatched echo): retry later. */
+  | { kind: 'UNKNOWN'; code: string; message: string; unreachable?: boolean };
+
+/** ResultCode (as a string) -> outcome. Codes not listed are retried (UNKNOWN), never FAILED. */
+export const STK_QUERY_RESULT_OUTCOMES: Readonly<Record<string, 'PAID' | 'FAILED' | 'RETRY'>> = {
+  '0': 'PAID',
+  '1': 'FAILED', // insufficient balance
+  '1019': 'FAILED', // transaction expired
+  '1032': 'FAILED', // request cancelled by the user
+  '1037': 'FAILED', // DS timeout: the user cannot be reached
+  '2001': 'FAILED', // wrong PIN / invalid initiator information
+  '1001': 'RETRY', // subscriber busy: another transaction in progress
+  '1025': 'RETRY', // error sending the push request
+  '4999': 'RETRY', // transaction still under processing
+  '9999': 'RETRY', // error sending the push request
+};
+
+/** Query errorCode -> outcome (the errorMessage refines 500.001.1001). Unlisted -> UNKNOWN. */
+export const STK_QUERY_ERROR_OUTCOMES: Readonly<Record<string, 'PROCESSING' | 'TOKEN' | 'THROTTLED'>> = {
+  '500.001.1001': 'PROCESSING', // "The transaction is being processed"
+  '400.003.01': 'TOKEN', // Invalid Access Token
+  '404.001.03': 'TOKEN', // Invalid Access Token
+  '500.003.02': 'THROTTLED', // System busy (spike arrest)
+  '500.003.03': 'THROTTLED', // Quota violation
+};
+
+type QueryMapped = StkQueryOutcome | { kind: 'TOKEN_INVALID'; code: string };
+
+/** Maps one STK Push Query HTTP response to an outcome; `ours` is the CheckoutRequestID asked about. */
+export function mapStkQueryResponse(status: number, body: any, ours: string): QueryMapped {
+  const errorCode = typeof body?.errorCode === 'string' ? body.errorCode.trim() : '';
+  if (errorCode) {
+    const rule = STK_QUERY_ERROR_OUTCOMES[errorCode];
+    const message = safe(body.errorMessage) || 'Daraja error';
+    if (rule === 'TOKEN') return { kind: 'TOKEN_INVALID', code: errorCode };
+    if (rule === 'THROTTLED') return { kind: 'PENDING', code: errorCode, message, throttled: true };
+    if (rule === 'PROCESSING' && /being processed/i.test(String(body.errorMessage ?? ''))) {
+      return { kind: 'PENDING', code: errorCode, message };
+    }
+    return { kind: 'UNKNOWN', code: errorCode, message };
+  }
+  if (status === 401) return { kind: 'TOKEN_INVALID', code: 'http_401' };
+  if (status === 429) return { kind: 'PENDING', code: 'http_429', message: 'throttled', throttled: true };
+  if (status >= 200 && status < 300 && body && typeof body === 'object') {
+    const responseCode = String(body.ResponseCode ?? '').trim();
+    if (responseCode !== '0') return { kind: 'UNKNOWN', code: `response_${responseCode || 'missing'}`.slice(0, 40), message: 'query not accepted' };
+    const echoed = typeof body.CheckoutRequestID === 'string' ? body.CheckoutRequestID.trim() : '';
+    if (echoed !== ours) return { kind: 'UNKNOWN', code: 'checkout_mismatch', message: 'answer is for another CheckoutRequestID' };
+    const resultCode = body.ResultCode === undefined || body.ResultCode === null ? '' : String(body.ResultCode).trim();
+    const resultDesc = safe(body.ResultDesc) || '';
+    const rule = STK_QUERY_RESULT_OUTCOMES[resultCode];
+    if (rule === 'PAID') return { kind: 'PAID', resultCode: '0', resultDesc };
+    if (rule === 'FAILED') return { kind: 'FAILED', resultCode, resultDesc };
+    if (rule === 'RETRY') return { kind: 'PENDING', code: `result_${resultCode}`, message: resultDesc || 'still processing' };
+    return { kind: 'UNKNOWN', code: `result_${resultCode || 'missing'}`.slice(0, 40), message: resultDesc || 'unlisted result code' };
+  }
+  return { kind: 'UNKNOWN', code: `http_${status}`, message: 'no definitive answer from Daraja' };
 }
 
 /** Resolves with `p`, or rejects once `deadline` (epoch ms) passes. */

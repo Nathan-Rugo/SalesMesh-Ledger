@@ -11,7 +11,9 @@
  *   /health/details (MERCHANT_ADMIN) reports queue, ML, login, STK and Daraja metrics.
  *
  * Settlement happens in background workers draining the durable intake queue
- * (settlement worker) and self-healing fail-safe quarantines (re-score worker).
+ * (settlement worker) and self-healing fail-safe quarantines (re-score worker). With
+ * RECONCILE_ENABLED=true the STK Query reconciliation sweep closes overdue ACCEPTED STK requests
+ * (spec gh-6-recon); statements are imported with `npm run reconcile:import`.
  * Graceful shutdown: close the server, stop the workers (draining the current batch),
  * then close Redis and PostgreSQL.
  */
@@ -29,6 +31,7 @@ import pool, { isDbHealthy, shutdownDb } from './config/db';
 import { assertPiiKey } from './config/pii';
 import { loadJwtKeyring } from './config/jwt';
 import { darajaConfig } from './daraja/client';
+import { overdueAfterMs, reconcileEnabled } from './config/reconcile';
 import { corsOrigins, publicOrigin, requireAuth } from './auth/middleware';
 import type { Db } from './repositories/db.types';
 
@@ -43,8 +46,10 @@ import { resilientRiskClient } from './services/risk_client.service';
 import { spoolService } from './services/spool.service';
 import { queueStats } from './repositories/intake.repository';
 import { quarantineStats } from './repositories/escrow.repository';
+import { reconcileStats } from './repositories/reconcile.repository';
 import { settlementWorker } from './workers/settlement.worker';
 import { rescoreWorker } from './workers/rescore.worker';
+import { reconcileWorker } from './workers/reconcile.worker';
 
 // ── Express Application Setup ─────────────────────────────────────────
 const app = express();
@@ -159,10 +164,11 @@ app.get('/health/details', detailsAuth, async (_req: Request, res: Response) => 
     const isHealthy = redisOk && dbOk;
 
     // Queue observability; best effort (null when the DB cannot answer within ~1.5 s).
-    const [queue, quarantine, spoolDepth] = await Promise.all([
+    const [queue, quarantine, spoolDepth, recon] = await Promise.all([
       dbOk ? withTimeout(queueStats(pool)) : null,
       dbOk ? withTimeout(quarantineStats(pool, rescoreWorker.config.maxAttempts)) : null,
       spoolService.depth(),
+      dbOk ? withTimeout(reconcileStats(pool, overdueAfterMs(reconcileWorker.config))) : null,
     ]);
 
     res.status(isHealthy ? 200 : 503).json({
@@ -175,7 +181,19 @@ app.get('/health/details', detailsAuth, async (_req: Request, res: Response) => 
       awaitingSelfHeal: quarantine?.awaitingSelfHeal ?? null,
       stalledQuarantines: quarantine?.stalledQuarantines ?? null,
       spoolDepth,
-      workers: { settlement: settlementWorker.isRunning(), rescore: rescoreWorker.isRunning() },
+      workers: { settlement: settlementWorker.isRunning(), rescore: rescoreWorker.isRunning(), reconcile: reconcileWorker.isRunning() },
+      reconciliation: {
+        enabled: reconcileEnabled(),
+        paidUnconfirmed: recon?.paidUnconfirmed ?? null,
+        reconcileExhausted: recon?.exhausted ?? null,
+        overdueAccepted: recon?.overdueAccepted ?? null,
+        oldestOverdueAcceptedAgeSeconds: recon?.oldestOverdueAcceptedAgeSeconds ?? null,
+        lastSweepAt: reconcileWorker.lastSweepAt?.toISOString() ?? null,
+        lastImportAt: recon?.lastImportAt ?? null,
+        latestImport: recon?.latestRun ?? null,
+        openExceptions: recon?.openExceptions ?? null,
+        sweepCounters: { ...reconcileWorker.counters },
+      },
       ...metrics.snapshot(),
       countersScope: 'per-process', // login / STK / Daraja counters reset on restart and are not summed across replicas
       stkEnabled: stkEnabled(),
@@ -216,7 +234,7 @@ const gracefulShutdown = async (signal: string, exitCode = 0) => {
 
   try {
     await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
-    await Promise.all([settlementWorker.stop(10_000), rescoreWorker.stop(10_000)]);
+    await Promise.all([settlementWorker.stop(10_000), rescoreWorker.stop(10_000), reconcileWorker.stop(10_000)]);
     await shutdownRedis();
     await shutdownDb();
     console.info('[Shutdown] All connections closed cleanly.');
@@ -238,11 +256,12 @@ process.on('uncaughtException', (err) => {
 });
 
 // ── Start Listener ────────────────────────────────────────────────────
-export const REQUIRED_MIGRATION = '002_auth_stk_initiation';
+export const REQUIRED_MIGRATION = '003_reconciliation';
 
 /**
  * Startup gates, without side effects: `fatal` problems refuse the start, `warnings` are logged.
- * Secrets, the JWT key ring, Daraja (when STK_ENABLED), the callback token, the schema version.
+ * Secrets, the JWT key ring, Daraja (when STK_ENABLED or RECONCILE_ENABLED), the callback token,
+ * the schema version.
  */
 export async function preflight(env: NodeJS.ProcessEnv, db: Db): Promise<{ fatal: string[]; warnings: string[] }> {
   const fatal: string[] = [];
@@ -256,7 +275,8 @@ export async function preflight(env: NodeJS.ProcessEnv, db: Db): Promise<{ fatal
   };
   gate(() => assertPiiKey(env)); // PII_HMAC_KEY >= 32 bytes: every stored hash depends on it
   gate(() => loadJwtKeyring(env)); // RS256 key ring, >= 2048-bit RSA: every access token depends on it
-  if (stkEnabled(env)) gate(() => darajaConfig(env)); // STK initiation needs the Daraja credentials
+  // STK initiation and the STK Query reconciliation sweep both need the Daraja credentials.
+  if (stkEnabled(env) || reconcileEnabled(env)) gate(() => darajaConfig(env));
   if (!env.MPESA_CALLBACK_TOKEN) fatal.push('MPESA_CALLBACK_TOKEN is not set (every Daraja callback would be rejected)');
   try {
     const { rows } = await db.query('SELECT 1 FROM schema_migrations WHERE version = $1', [REQUIRED_MIGRATION]);
@@ -299,6 +319,7 @@ async function startup(): Promise<void> {
 
   settlementWorker.start();
   rescoreWorker.start();
+  if (reconcileEnabled()) reconcileWorker.start();
 
   server = app.listen(PORT, () => {
     console.info(`[Gateway] SalesMesh-Ledger ingestion gateway listening on :${PORT}`);
