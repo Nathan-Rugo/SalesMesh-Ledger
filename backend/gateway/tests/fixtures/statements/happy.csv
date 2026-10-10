@@ -1,0 +1,14 @@
+﻿Organization Name:,ACME TRADERS LTD
+Short Code:,174379
+Account:,Utility Account
+Time Period:,From 01-10-2026 00:00:00 To 09-10-2026 23:59:59
+Operator:,ops admin
+
+Receipt No.,Completion Time,Initiation Time,Details,Transaction Status,Paid In,Withdrawn,Balance,Balance Confirmed,Reason Type,Other Party Info,Linked Transaction ID,A/C No.
+SJA1000001,09-10-2026 10:15:30,09-10-2026 10:15:02,Pay Bill Online,Completed,"1,500.00",,"101,500.00",true,Pay Bill Online,254712345678 - JANE DOE,,AG042
+SJA1000002,09-10-2026 11:00:00,09-10-2026 10:59:58,Pay Bill from 2547****678 - JOHN DOE Acc. AG043,Completed,250.00,,101750.00,true,Pay Bill,2547****678 - JOHN DOE,,ag043
+SJA1000003,09-10-2026 12:00:00,09-10-2026 12:00:00,Business Charge,Completed,,-15.00,101735.00,true,Pay Bill Charge,,,
+SJA1000004,09-10-2026 13:00:00,09-10-2026 13:00:00,Merchant Payment,Failed,300.00,,101735.00,true,Merchant Payment,254711111111 - MARY ANN,,AG042
+SJA1000005,2026-10-09 14:00:00,2026-10-09 13:59:59,Funds Transfer,Completed,"10,000.00",,111735.00,true,Business Transfer from,600000 - SOME BANK,,
+SJA1000006,09-10-2026 15:00:00,09-10-2026 15:00:00,Withdrawal,Completed,,"-5,000.00",106735.00,true,Business Settlement,,,
+,,,,Total,"11,750.00","-5,015.00",,,,,,
