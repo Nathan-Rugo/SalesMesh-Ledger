@@ -438,6 +438,8 @@ describe('/health/details observability', () => {
       lastSweepAt: null,
       sweepCounters: expect.objectContaining({ paid: 0, failed: 0, exhausted: 0 }),
     });
+    // spec gh-11 part 3c: frozen-payout SLA escalation counters
+    expect(res.body.frozenSla).toEqual({ escalated: expect.any(Number), alertsSent: expect.any(Number), alertsFailed: expect.any(Number) });
     expect(res.body.circuitBreaker.state).toBe('CLOSED');
     expect(res.body.ml).toMatchObject({ timeoutMs: 500, timeoutRate: 0 });
     expect(res.body.payoutsByStatus).toEqual({ SENT: 0, UNKNOWN: 0, PAID: 0, FAILED: 0, UNRESOLVED: 2 });
@@ -726,6 +728,11 @@ describe('spec gh-5 — the real app mounts auth, payments, CORS and readiness',
     } finally {
       delete process.env.CORS_ORIGINS;
     }
+  });
+
+  it('the frozen-payout queue (spec gh-11 part 3c) is mounted: no token → 401 (not 404), SALES_AGENT → 403', async () => {
+    expect((await getJson('/api/v1/admin/frozen-payouts')).status).toBe(401);
+    expect(await getJson('/api/v1/admin/frozen-payouts', await tokenFor('SALES_AGENT'))).toEqual({ status: 403, body: { error: 'forbidden' } });
   });
 
   it('/health/ready → 503 degraded when Redis is down, and when Postgres is down', async () => {

@@ -404,12 +404,15 @@ CREATE TABLE IF NOT EXISTS payouts (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     resolved_at TIMESTAMPTZ,
+    unresolved_at TIMESTAMPTZ,                        -- when it became UNRESOLVED (spec gh-11 part 3c: SLA clock)
+    sla_escalated_at TIMESTAMPTZ,                     -- when its SLA breach was escalated to admins (once)
     CONSTRAINT payouts_carry_arithmetic CHECK (gross_cents + carry_in_cents = amount::bigint * 100 + carry_out_cents)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS payouts_one_open ON payouts (agent_id) WHERE status IN ('SENT', 'UNKNOWN', 'UNRESOLVED');
 CREATE INDEX IF NOT EXISTS payouts_agent_idx ON payouts (agent_id, created_at);
 CREATE INDEX IF NOT EXISTS payouts_status_check_idx ON payouts (created_at) WHERE status IN ('SENT', 'UNKNOWN');
 CREATE INDEX IF NOT EXISTS payouts_status_query_ids_idx ON payouts USING GIN (status_query_ids);
+CREATE INDEX IF NOT EXISTS payouts_unresolved_idx ON payouts (unresolved_at) WHERE status = 'UNRESOLVED';
 
 -- Table 15: UFAA_RETURNS (spec gh-11, part 3b). One annual Unclaimed Financial Assets Act return per
 -- 30 June period: DRAFT → NOTICED (owners SMS-noticed) → REPORTED (holder report CSV written) →
@@ -475,6 +478,10 @@ CREATE TABLE IF NOT EXISTS escrow_accounts (
     -- Unclaimed reminders (spec gh-11 part 3a): highest stage sent for the cycle this oldest escrow keys.
     unclaimed_reminder_stage SMALLINT NOT NULL DEFAULT 0
         CONSTRAINT escrow_accounts_unclaimed_reminder_stage CHECK (unclaimed_reminder_stage BETWEEN 0 AND 3),
+    -- Frozen-payout SLA (spec gh-11 part 3c), kept by the escrow_accounts_freeze_clock trigger: when this
+    -- QUARANTINED spell began, and when its SLA breach was escalated to admins (once per spell).
+    frozen_at TIMESTAMPTZ,
+    sla_escalated_at TIMESTAMPTZ,
     CONSTRAINT escrow_accounts_claimed_payout CHECK (escrow_status <> 'CLAIMED' OR payout_id IS NOT NULL),
     CONSTRAINT escrow_accounts_remitted_return CHECK (escrow_status <> 'REMITTED' OR ufaa_return_id IS NOT NULL)
 );
@@ -486,6 +493,28 @@ CREATE INDEX IF NOT EXISTS escrow_accounts_rescore_idx
 -- Trust maturity sweep (spec gh-23): matured holds decided under the trust regime.
 CREATE INDEX IF NOT EXISTS escrow_accounts_matured_idx
     ON escrow_accounts (release_due_at) WHERE escrow_status IN ('HELD', 'CLAIMED', 'RELEASED') AND hold_seconds IS NOT NULL;
+CREATE INDEX IF NOT EXISTS escrow_accounts_frozen_idx ON escrow_accounts (frozen_at) WHERE escrow_status = 'QUARANTINED';
+
+-- The freeze clock, generic on INSERT or UPDATE OF escrow_status, so it covers every writer (settle insert,
+-- security hold, payout failure, importer reversal, rescore promote, and future ones): entering QUARANTINED
+-- starts a new spell (frozen_at, escalation cleared); leaving clears both.
+CREATE OR REPLACE FUNCTION escrow_accounts_freeze_clock() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+    IF NEW.escrow_status = 'QUARANTINED' THEN
+        IF TG_OP = 'INSERT' OR OLD.escrow_status IS DISTINCT FROM 'QUARANTINED' THEN
+            NEW.frozen_at := NOW();
+            NEW.sla_escalated_at := NULL;
+        END IF;
+    ELSE
+        NEW.frozen_at := NULL;
+        NEW.sla_escalated_at := NULL;
+    END IF;
+    RETURN NEW;
+END
+$fn$;
+DROP TRIGGER IF EXISTS escrow_accounts_freeze_clock ON escrow_accounts;
+CREATE TRIGGER escrow_accounts_freeze_clock BEFORE INSERT OR UPDATE OF escrow_status ON escrow_accounts
+    FOR EACH ROW EXECUTE FUNCTION escrow_accounts_freeze_clock();
 
 -- Reconciliation exceptions an operator must act on (spec gh-6-recon): a reversal of a payment whose
 -- escrow was already RELEASED (CLAWBACK_DUE), or a RELEASED payment missing from the statement.
@@ -536,5 +565,6 @@ CREATE TABLE IF NOT EXISTS tax_deductions (
 -- A fresh install already has every migration's shape.
 INSERT INTO schema_migrations (version) VALUES ('001_settlement_pipeline'), ('002_auth_stk_initiation'), ('003_reconciliation'),
                                                ('004_trust_scores'), ('005_payout_destinations'), ('006_payout_claims'),
-                                               ('007_unclaimed_reminders'), ('008_ufaa_remittance')
+                                               ('007_unclaimed_reminders'), ('008_ufaa_remittance'),
+                                               ('009_frozen_sla_escalation')
     ON CONFLICT (version) DO NOTHING;

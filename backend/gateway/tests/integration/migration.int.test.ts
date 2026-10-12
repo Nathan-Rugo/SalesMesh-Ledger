@@ -1,10 +1,10 @@
 /**
- * Migrations 001–008 against real Postgres: legacy schema + 001 + … + 008 == fresh init schema,
+ * Migrations 001–009 against real Postgres: legacy schema + 001 + … + 009 == fresh init schema,
  * legacy rows are backfilled, and re-running (or running on a fresh install) is a no-op.
  */
 
 import type { Pool } from 'pg';
-import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006, MIGRATION_007, MIGRATION_008, type TestDb } from './helpers';
+import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006, MIGRATION_007, MIGRATION_008, MIGRATION_009, type TestDb } from './helpers';
 
 jest.setTimeout(60_000);
 
@@ -19,10 +19,11 @@ async function shape(pool: Pool) {
        FROM pg_constraint WHERE connamespace = 'public'::regnamespace`
   );
   const consSorted = cons.rows.map((r) => `${r.t}|${r.contype}|${r.def}`).sort();
-  return { cols: cols.rows, idx: idx.rows, cons: consSorted };
+  const trg = await pool.query(`SELECT pg_get_triggerdef(oid) AS def FROM pg_trigger WHERE NOT tgisinternal ORDER BY 1`);
+  return { cols: cols.rows, idx: idx.rows, cons: consSorted, trg: trg.rows };
 }
 
-describeDb('migrations 001_settlement_pipeline … 008_ufaa_remittance', () => {
+describeDb('migrations 001_settlement_pipeline … 009_frozen_sla_escalation', () => {
   let legacy: TestDb;
   let fresh: TestDb;
 
@@ -147,10 +148,27 @@ describeDb('migrations 001_settlement_pipeline … 008_ufaa_remittance', () => {
     await p.query(`UPDATE escrow_accounts SET escrow_status = 'REMITTED', ufaa_return_id = $1`, [ret.return_id]);
     await p.query(`INSERT INTO security_events (event_type, subject_user_id, detail) VALUES ('UFAA_REMITTED', $1, 'x')`, [u.user_id]);
 
+    // 009: frozen rows get a freeze time (QUARANTINED: latest evaluation; UNRESOLVED payout: last update); re-run is a no-op.
+    await p.query(`UPDATE escrow_accounts SET escrow_status = 'QUARANTINED'`);
+    const { rows: [d] } = await p.query(`SELECT destination_id FROM payout_destinations LIMIT 1`);
+    await p.query(
+      `INSERT INTO payouts (payout_id, agent_id, destination_id, msisdn, amount, gross_cents, carry_in_cents, carry_out_cents, disclosure_version, consent_hash, accepted_at, status, updated_at)
+       VALUES (gen_random_uuid(), $1, $2, '254700000001', 10, 1000, 0, 0, '1', 'x', NOW(), 'UNRESOLVED', '2026-02-01 00:00:00+00')`,
+      [a.agent_id, d.destination_id]
+    );
+    await p.query(MIGRATION_009);
+    await p.query(MIGRATION_009);
+    const { rows: [ev] } = await p.query(`SELECT max(evaluated_at) AS t FROM verification_events`);
+    expect((await p.query(`SELECT frozen_at FROM escrow_accounts`)).rows[0].frozen_at).toEqual(ev.t);
+    expect((await p.query(`SELECT unresolved_at FROM payouts`)).rows[0].unresolved_at).toEqual(new Date('2026-02-01T00:00:00Z'));
+    await p.query(`UPDATE escrow_accounts SET escrow_status = 'HELD', ufaa_return_id = NULL`); // the trigger exists: leaving clears the clock
+    expect((await p.query(`SELECT frozen_at FROM escrow_accounts`)).rows[0].frozen_at).toBeNull();
+
     const [a1, b1] = await Promise.all([shape(legacy.pool), shape(fresh.pool)]);
     expect(a1.cols).toEqual(b1.cols);
     expect(a1.idx).toEqual(b1.idx);
     expect(a1.cons).toEqual(b1.cons);
+    expect(a1.trg).toEqual(b1.trg);
   });
 
   it('is a no-op when re-run, and on a fresh install', async () => {
@@ -163,6 +181,7 @@ describeDb('migrations 001_settlement_pipeline … 008_ufaa_remittance', () => {
     await legacy.pool.query(MIGRATION_006);
     await legacy.pool.query(MIGRATION_007);
     await legacy.pool.query(MIGRATION_008);
+    await legacy.pool.query(MIGRATION_009);
     expect(await shape(legacy.pool)).toEqual(before);
 
     const freshBefore = await shape(fresh.pool);
@@ -174,9 +193,10 @@ describeDb('migrations 001_settlement_pipeline … 008_ufaa_remittance', () => {
     await fresh.pool.query(MIGRATION_006);
     await fresh.pool.query(MIGRATION_007);
     await fresh.pool.query(MIGRATION_008);
+    await fresh.pool.query(MIGRATION_009);
     expect(await shape(fresh.pool)).toEqual(freshBefore);
     const { rows } = await fresh.pool.query(`SELECT version FROM schema_migrations ORDER BY version`);
-    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation', '003_reconciliation', '004_trust_scores', '005_payout_destinations', '006_payout_claims', '007_unclaimed_reminders', '008_ufaa_remittance']);
+    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation', '003_reconciliation', '004_trust_scores', '005_payout_destinations', '006_payout_claims', '007_unclaimed_reminders', '008_ufaa_remittance', '009_frozen_sla_escalation']);
   });
 
   it('enforces the agent_code CHECK (upper-case, trimmed)', async () => {
