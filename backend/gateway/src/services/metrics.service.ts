@@ -22,6 +22,8 @@ export class GatewayMetrics {
   readonly payouts = { ACCEPTED: 0, REJECTED: 0, UNKNOWN: 0, rateLimited: 0, activated: 0, rejected: 0, expired: 0, cancelled: 0, alertsSent: 0, alertsFailed: 0 };
   /** Agent-claimed payouts (spec gh-11, part 2): claims, outcomes, Transaction Status queries, unclaimed reminders (part 3a). */
   readonly payoutClaims = { claimed: 0, paid: 0, failed: 0, unknown: 0, unresolved: 0, nameMismatch: 0, statusQueries: 0, reminders: 0, remindersFailed: 0 };
+  /** Frozen-payout SLA escalation (spec gh-11, part 3c): items escalated, admin digests sent / failed. */
+  readonly frozenSla = { escalated: 0, alertsSent: 0, alertsFailed: 0 };
   private readonly darajaLatency: number[] = [];
   globalLoginFailureAlarm = false;
 
@@ -39,6 +41,7 @@ export class GatewayMetrics {
       stk: { ...this.stk, failedCallbacks: { ...this.stkCallbacksFailed } },
       payouts: { ...this.payouts },
       payoutClaims: { ...this.payoutClaims },
+      frozenSla: { ...this.frozenSla },
       darajaLatencyMs: { samples: sorted.length, p50: q(0.5), p95: q(0.95), max: sorted.length ? Math.round(sorted[sorted.length - 1]) : null },
     };
   }

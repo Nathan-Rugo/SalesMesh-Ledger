@@ -34,6 +34,9 @@ export interface PayoutConfig {
   reminderDays: [number, number, number];
   /** Reminders are sent only from the first to before the second hour, Africa/Nairobi. */
   reminderHours: [number, number];
+  /** Frozen-payout SLA (part 3c): hours a QUARANTINED escrow / UNRESOLVED payout may wait before admins are alerted. */
+  frozenEscrowSlaHours: number;
+  unresolvedPayoutSlaHours: number;
 }
 
 export class PayoutConfigError extends Error {}
@@ -51,8 +54,20 @@ function intList(env: NodeJS.ProcessEnv, name: string, fallback: number[], min: 
   if (!v) return fallback;
   const xs = v.split(',').map((x) => x.trim());
   const ok = xs.length === fallback.length && xs.every((x, i) => /^\d{1,4}$/.test(x) && +x >= min && +x <= max && (i === 0 || +x > +xs[i - 1]));
+  if (!ok && fallback.length === 1) throw new PayoutConfigError(`${name} must be a whole number from ${min} to ${max}`);
   if (!ok) throw new PayoutConfigError(`${name} must be ${fallback.length} strictly increasing whole numbers from ${min} to ${max}, comma-separated`);
   return xs.map(Number);
+}
+
+export type FrozenSlaConfig = Pick<PayoutConfig, 'frozenEscrowSlaHours' | 'unresolvedPayoutSlaHours' | 'reminderHours'>;
+
+/** What the frozen-payout SLA sweep and queue need (part 3c), so a bad unrelated PAYOUT_* cannot break them. */
+export function frozenSlaConfig(env: NodeJS.ProcessEnv = process.env): FrozenSlaConfig {
+  return {
+    reminderHours: intList(env, 'PAYOUT_REMINDER_HOURS', [8, 20], 0, 24) as PayoutConfig['reminderHours'],
+    frozenEscrowSlaHours: intList(env, 'FROZEN_ESCROW_SLA_HOURS', [72], 1, 8760)[0],
+    unresolvedPayoutSlaHours: intList(env, 'UNRESOLVED_PAYOUT_SLA_HOURS', [24], 1, 8760)[0],
+  };
 }
 
 /** PAYOUT_* settings with their defaults; throws PayoutConfigError on an invalid value. */
@@ -64,7 +79,7 @@ export function payoutConfig(env: NodeJS.ProcessEnv = process.env): PayoutConfig
     statusMaxAttempts: posInt(env, 'PAYOUT_STATUS_MAX_ATTEMPTS', 6),
     disclosureVersion: env.PAYOUT_DISCLOSURE_VERSION?.trim() || '1',
     reminderDays: intList(env, 'PAYOUT_REMINDER_DAYS', [7, 30, 90], 1, 3650) as PayoutConfig['reminderDays'],
-    reminderHours: intList(env, 'PAYOUT_REMINDER_HOURS', [8, 20], 0, 24) as PayoutConfig['reminderHours'],
+    ...frozenSlaConfig(env),
   };
   if (cfg.minAmount > cfg.maxAmount) throw new PayoutConfigError('PAYOUT_MIN_AMOUNT must not exceed PAYOUT_MAX_AMOUNT');
   if (!DISCLOSURES[cfg.disclosureVersion]) throw new PayoutConfigError(`PAYOUT_DISCLOSURE_VERSION ${cfg.disclosureVersion} has no disclosure text`);

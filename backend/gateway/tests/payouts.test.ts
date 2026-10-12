@@ -72,7 +72,13 @@ describe('PAYOUT_* config', () => {
   it('defaults, overrides and refusals', () => {
     expect(payoutConfig({})).toEqual({
       minAmount: 10, maxAmount: 150_000, statusAfterMs: 600_000, statusMaxAttempts: 6, disclosureVersion: '1', reminderDays: [7, 30, 90], reminderHours: [8, 20],
+      frozenEscrowSlaHours: 72, unresolvedPayoutSlaHours: 24,
     });
+    expect(payoutConfig({ FROZEN_ESCROW_SLA_HOURS: ' 48 ', UNRESOLVED_PAYOUT_SLA_HOURS: '8760' })).toMatchObject({ frozenEscrowSlaHours: 48, unresolvedPayoutSlaHours: 8760 });
+    for (const bad of ['0', '8761', '1.5', '24,48', 'x']) {
+      expect(() => payoutConfig({ FROZEN_ESCROW_SLA_HOURS: bad })).toThrow('FROZEN_ESCROW_SLA_HOURS must be a whole number from 1 to 8760');
+      expect(() => payoutConfig({ UNRESOLVED_PAYOUT_SLA_HOURS: bad })).toThrow(PayoutConfigError);
+    }
     expect(payoutConfig({ PAYOUT_REMINDER_DAYS: ' 3, 14 ,60', PAYOUT_REMINDER_HOURS: '0,24' })).toMatchObject({ reminderDays: [3, 14, 60], reminderHours: [0, 24] });
     expect(payoutConfig({ PAYOUT_MIN_AMOUNT: '50', PAYOUT_STATUS_MAX_ATTEMPTS: '3' })).toMatchObject({ minAmount: 50, statusMaxAttempts: 3 });
     for (const bad of [{ PAYOUT_MIN_AMOUNT: '0' }, { PAYOUT_MAX_AMOUNT: '1.5' }, { PAYOUT_MIN_AMOUNT: '200', PAYOUT_MAX_AMOUNT: '100' }, { PAYOUT_DISCLOSURE_VERSION: '9' },
@@ -97,6 +103,9 @@ describe('PAYOUT_* config', () => {
     const days = { PAYOUT_REMINDER_DAYS: '30,7,90' };
     expect((await preflight(days, db)).fatal.join('\n')).not.toMatch(/PAYOUT_REMINDER_DAYS/);
     expect((await preflight({ ...days, PAYOUTS_ENABLED: 'true' }, db)).fatal.join('\n')).toMatch(/PAYOUT_REMINDER_DAYS must be 3 strictly increasing/);
+    // Payouts off: the SLA sweep and queue (part 3c) still read their settings, so a bad one is a warning; unrelated PAYOUT_* are not.
+    expect((await preflight({ FROZEN_ESCROW_SLA_HOURS: '0' }, db)).warnings.join('\n')).toMatch(/FROZEN_ESCROW_SLA_HOURS.*SLA sweep and \/api\/v1\/admin\/frozen-payouts cannot work/);
+    expect((await preflight({ PAYOUT_DISCLOSURE_VERSION: '9' }, db)).warnings.join('\n')).not.toMatch(/SLA sweep/);
   });
 });
 
@@ -209,19 +218,23 @@ describe('PAYOUTS_ENABLED gate', () => {
     }
   });
 
-  it('the settlement worker housekeeping runs the payout status sweep and unclaimed reminders only while PAYOUTS_ENABLED=true', async () => {
+  it('the settlement worker housekeeping runs the payout status sweep and unclaimed reminders only while PAYOUTS_ENABLED=true; the frozen SLA sweep always', async () => {
     const sweep = jest.fn(async () => ({ queried: 0, unresolved: 0 }));
     const remindUnclaimed = jest.fn(async () => { throw new Error('db down'); });
-    const w = new SettlementWorker({ pool: fakeDb, spool: null, payouts: { sweep: jest.fn(async () => ({ promoted: 0, expired: 0 })) }, payoutClaims: { sweep, remindUnclaimed } });
+    const escalate = jest.fn(async () => { throw new Error('sla down'); });
+    const w = new SettlementWorker({ pool: fakeDb, spool: null, payouts: { sweep: jest.fn(async () => ({ promoted: 0, expired: 0 })) }, payoutClaims: { sweep, remindUnclaimed }, frozen: { escalate } });
     const err = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     process.env.PAYOUTS_ENABLED = 'false';
     await w.housekeeping(true);
     expect(sweep).not.toHaveBeenCalled();
     expect(remindUnclaimed).not.toHaveBeenCalled();
+    expect(escalate).toHaveBeenCalledTimes(1);
+    expect(err).toHaveBeenCalledWith(expect.stringMatching(/frozen-payout SLA sweep failed/), 'sla down');
     process.env.PAYOUTS_ENABLED = 'true';
     await w.housekeeping(true); // a reminder failure is logged, never thrown
     expect(sweep).toHaveBeenCalledTimes(1);
     expect(remindUnclaimed).toHaveBeenCalledTimes(1);
+    expect(escalate).toHaveBeenCalledTimes(2);
     expect(err).toHaveBeenCalledWith(expect.stringMatching(/unclaimed reminder sweep failed/), 'db down');
     err.mockRestore();
     delete process.env.PAYOUTS_ENABLED;
