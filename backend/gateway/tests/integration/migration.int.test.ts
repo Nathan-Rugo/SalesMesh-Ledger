@@ -1,10 +1,10 @@
 /**
- * Migrations 001–006 against real Postgres: legacy schema + 001 + … + 006 == fresh init schema,
+ * Migrations 001–007 against real Postgres: legacy schema + 001 + … + 007 == fresh init schema,
  * legacy rows are backfilled, and re-running (or running on a fresh install) is a no-op.
  */
 
 import type { Pool } from 'pg';
-import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006, type TestDb } from './helpers';
+import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006, MIGRATION_007, type TestDb } from './helpers';
 
 jest.setTimeout(60_000);
 
@@ -22,7 +22,7 @@ async function shape(pool: Pool) {
   return { cols: cols.rows, idx: idx.rows, cons: consSorted };
 }
 
-describeDb('migrations 001_settlement_pipeline … 006_payout_claims', () => {
+describeDb('migrations 001_settlement_pipeline … 007_unclaimed_reminders', () => {
   let legacy: TestDb;
   let fresh: TestDb;
 
@@ -134,6 +134,11 @@ describeDb('migrations 001_settlement_pipeline … 006_payout_claims', () => {
     await expect(p.query(`UPDATE escrow_accounts SET escrow_status = 'CLAIMED'`)).rejects.toThrow(/escrow_accounts_claimed_payout/);
     await p.query(`INSERT INTO security_events (event_type, subject_user_id, detail) VALUES ('PAYOUT_STATUS_CHANGED', $1, 'x')`, [u.user_id]);
 
+    // 007: existing escrows start at reminder stage 0; stages are 0..3.
+    await p.query(MIGRATION_007);
+    expect((await p.query(`SELECT unclaimed_reminder_stage FROM escrow_accounts`)).rows[0].unclaimed_reminder_stage).toBe(0);
+    await expect(p.query(`UPDATE escrow_accounts SET unclaimed_reminder_stage = 4`)).rejects.toThrow(/escrow_accounts_unclaimed_reminder_stage/);
+
     const [a1, b1] = await Promise.all([shape(legacy.pool), shape(fresh.pool)]);
     expect(a1.cols).toEqual(b1.cols);
     expect(a1.idx).toEqual(b1.idx);
@@ -148,6 +153,7 @@ describeDb('migrations 001_settlement_pipeline … 006_payout_claims', () => {
     await legacy.pool.query(MIGRATION_004);
     await legacy.pool.query(MIGRATION_005);
     await legacy.pool.query(MIGRATION_006);
+    await legacy.pool.query(MIGRATION_007);
     expect(await shape(legacy.pool)).toEqual(before);
 
     const freshBefore = await shape(fresh.pool);
@@ -157,9 +163,10 @@ describeDb('migrations 001_settlement_pipeline … 006_payout_claims', () => {
     await fresh.pool.query(MIGRATION_004);
     await fresh.pool.query(MIGRATION_005);
     await fresh.pool.query(MIGRATION_006);
+    await fresh.pool.query(MIGRATION_007);
     expect(await shape(fresh.pool)).toEqual(freshBefore);
     const { rows } = await fresh.pool.query(`SELECT version FROM schema_migrations ORDER BY version`);
-    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation', '003_reconciliation', '004_trust_scores', '005_payout_destinations', '006_payout_claims']);
+    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation', '003_reconciliation', '004_trust_scores', '005_payout_destinations', '006_payout_claims', '007_unclaimed_reminders']);
   });
 
   it('enforces the agent_code CHECK (upper-case, trimmed)', async () => {

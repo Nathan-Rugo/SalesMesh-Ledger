@@ -15,6 +15,10 @@
  *
  * Every state change writes a PAYOUT_STATUS_CHANGED event (same transaction) and sends an SMS to the
  * paid line. Alerts never block or roll back the flow.
+ *
+ * Unclaimed reminders (part 3a): housekeeping texts the login phone when the claimable balance has
+ * waited PAYOUT_REMINDER_DAYS (7, 30, 90) since its oldest escrow matured, once per stage per cycle,
+ * only in PAYOUT_REMINDER_HOURS (Africa/Nairobi).
  */
 
 import crypto from 'crypto';
@@ -30,6 +34,7 @@ import {
   applyStatusResult,
   claimableEscrows,
   createPayout,
+  dueReminders,
   exhaustStatusChecks,
   leaseStatusChecks,
   listPayouts,
@@ -81,6 +86,7 @@ export type ClaimResult =
 
 const LEASE_MS = 120_000;
 const MAX_BACKOFF_MS = 6 * 3600_000;
+const REMINDER_EVERY_MS = 3600_000;
 
 export class PayoutService {
   private readonly db: TxDb;
@@ -90,6 +96,7 @@ export class PayoutService {
   private readonly metrics: GatewayMetrics;
   private readonly overrides: Partial<PayoutConfig>;
   private readonly inflightAlerts = new Set<Promise<unknown>>();
+  private lastReminderRun = -Infinity;
 
   constructor(deps: PayoutDeps = {}) {
     this.db = deps.db ?? pool;
@@ -234,6 +241,37 @@ export class PayoutService {
       this.alert(c.payout, 'UNRESOLVED');
     }
     return { queried, unresolved: unresolved.length };
+  }
+
+  /**
+   * Housekeeping: at most one SMS per agent whose claimable balance has reached a reminder stage. The
+   * stage is recorded before the send (a failed SMS is counted, never retried). Outside the daytime
+   * window nothing is marked, so the reminder goes at the next daytime sweep. At most one query per hour.
+   * No-op while PAYOUTS_ENABLED≠true.
+   */
+  async remindUnclaimed(now = new Date()): Promise<number> {
+    if (!payoutsEnabled()) return 0;
+    const cfg = this.config();
+    const hour = (now.getUTCHours() + 3) % 24; // Africa/Nairobi: UTC+3, no DST
+    if (hour < cfg.reminderHours[0] || hour >= cfg.reminderHours[1]) return 0;
+    // Ages move by days: query at most hourly (a night skip does not use up the hour).
+    if (now.getTime() - this.lastReminderRun < REMINDER_EVERY_MS) return 0;
+    const due = await dueReminders(this.db, { stages: cfg.reminderDays, minAmount: cfg.minAmount, limit: 100 });
+    this.lastReminderRun = now.getTime();
+    for (const r of due) {
+      const amount = Math.floor(r.cents / 100);
+      const how = r.hasActiveDestination
+        ? 'Claim it in the SalesMesh app with your PIN; it is paid to your verified M-Pesa line.'
+        : 'Register your M-Pesa payout line in the SalesMesh app first, then claim it with your PIN.';
+      console.info(`[Payouts] unclaimed reminder (stage ${r.stage}) KES ${amount} to ${maskMsisdn(r.phone)}`);
+      const send = notifySafely(this.notifier, r.phone, `SalesMesh: KES ${amount} commission is waiting for you to claim. ${how}`, this.metrics).then((ok) => {
+        if (ok) this.metrics.payoutClaims.reminders += 1;
+        else this.metrics.payoutClaims.remindersFailed += 1;
+      });
+      this.inflightAlerts.add(send);
+      void send.finally(() => this.inflightAlerts.delete(send));
+    }
+    return due.length;
   }
 
   /** `npm run payout:resolve <id> paid <receipt> | failed`: only an UNRESOLVED payout. */
