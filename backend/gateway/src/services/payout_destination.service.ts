@@ -11,7 +11,7 @@
  * agent can cancel it, then the sweep promotes it. A result that never comes expires the row (30 min).
  *
  * Every change writes a PAYOUT_DESTINATION_CHANGED security event (same transaction) and sends a
- * WhatsApp alert to the destination's phone and the agent's other open destinations (so the owner
+ * SMS alert to the destination's phone and the agent's other open destinations (so the owner
  * of the current ACTIVE phone hears about a replacement). Alerts never block or roll back the flow.
  */
 

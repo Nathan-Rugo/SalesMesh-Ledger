@@ -288,10 +288,10 @@ export async function preflight(env: NodeJS.ProcessEnv, db: Db): Promise<{ fatal
   gate(() => trustConfig(env)); // risk-adaptive hold parameters (spec gh-23): every escrow hold depends on them
   // STK initiation and the STK Query reconciliation sweep both need the Daraja credentials.
   if (stkEnabled(env) || reconcileEnabled(env)) gate(() => darajaConfig(env));
-  // Payout-destination verification (spec gh-11) needs the B2C initiator; Twilio stays optional.
+  // Payout-destination verification (spec gh-11) needs the B2C initiator; SMS alerts stay optional.
   if (payoutsEnabled(env)) gate(() => b2cConfig(env));
-  const twilio = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_WHATSAPP_FROM'].filter((k) => env[k]?.trim());
-  if (twilio.length > 0 && twilio.length < 3) warnings.push('TWILIO_* is only partly set: payout alerts are log-only until all three are set');
+  const sms = ['AFRICASTALKING_USERNAME', 'AFRICASTALKING_API_KEY'].filter((k) => env[k]?.trim());
+  if (sms.length === 1) warnings.push('AFRICASTALKING_* is only partly set: payout alerts are log-only until both are set');
   if (!env.MPESA_CALLBACK_TOKEN) fatal.push('MPESA_CALLBACK_TOKEN is not set (every Daraja callback would be rejected)');
   try {
     const { rows } = await db.query('SELECT 1 FROM schema_migrations WHERE version = $1', [REQUIRED_MIGRATION]);

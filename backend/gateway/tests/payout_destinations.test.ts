@@ -1,9 +1,9 @@
 /**
  * @file payout_destinations.test.ts
  * @description Verified payout destinations (spec gh-11): one test per I/O-matrix row over HTTP,
- * the name-match table, B2C config / request / response / result mapping, the notifier (Twilio
+ * the name-match table, B2C config / request / response / result mapping, the notifier (Africa's Talking
  * request shape, failure isolation), the webhook routes and the worker sweep hook. Daraja and
- * Twilio are mocked via fetch, Redis via an in-memory store, the repositories in memory.
+ * Africa's Talking are mocked via fetch, Redis via an in-memory store, the repositories in memory.
  */
 
 jest.mock('../src/repositories/payout_destination.repository', () => require('./support/memory-payout-repo'));
@@ -27,7 +27,7 @@ import { preflight, redactPath } from '../src/index';
 import { createPayoutDestinationRouter } from '../src/routes/payout_destination.routes';
 import webhookRoutes from '../src/routes/webhook.routes';
 import { GatewayMetrics } from '../src/services/metrics.service';
-import { LogNotifier, notifierFromEnv, notifySafely, TwilioWhatsAppNotifier, type Notifier } from '../src/services/notifier.service';
+import { LogNotifier, notifierFromEnv, notifySafely, AfricasTalkingSmsNotifier, type Notifier } from '../src/services/notifier.service';
 import { PayoutDestinationService, payoutDestinationService, verificationAmount } from '../src/services/payout_destination.service';
 import { SettlementWorker } from '../src/workers/settlement.worker';
 import { b2cAccepted, b2cResultBody, darajaFetch, TEST_B2C_CONFIG, type StkHandler } from './support/daraja-fetch';
@@ -60,7 +60,7 @@ let notifyFails: boolean;
 
 const notifier: Notifier = {
   send: async (to, message) => {
-    if (notifyFails) throw new Error('Twilio HTTP 500');
+    if (notifyFails) throw new Error("Africa's Talking HTTP 500");
     sent.push({ to, message });
   },
 };
@@ -144,7 +144,7 @@ afterEach(async () => {
 });
 
 describe('I/O matrix', () => {
-  it('first registration: 202 PENDING_VERIFICATION, one KES 1 B2C to the login phone; a matching result → ACTIVE + WhatsApp alert', async () => {
+  it('first registration: 202 PENDING_VERIFICATION, one KES 1 B2C to the login phone; a matching result → ACTIVE + SMS alert', async () => {
     const res = await register();
     expect(res.status).toBe(202);
     const id = res.body.destination.destination_id;
@@ -391,12 +391,12 @@ describe('I/O matrix', () => {
     expect(fetchMock.calls.b2c).toBe(0);
   });
 
-  it('payouts off: startup does not require the B2C or Twilio settings; on: B2C is required', async () => {
+  it('payouts off: startup does not require the B2C or SMS settings; on: B2C is required', async () => {
     const db: any = { query: jest.fn(async () => ({ rows: [{}], rowCount: 1 })) };
     const base = { NODE_ENV: 'development', PII_HMAC_KEY: process.env.PII_HMAC_KEY, JWT_PRIVATE_KEY: process.env.JWT_PRIVATE_KEY, JWT_KEY_ID: 'test-k1', MPESA_CALLBACK_TOKEN: 'cbtok123' };
     expect(await preflight(base, db)).toEqual({ fatal: [], warnings: [] });
     expect((await preflight({ ...base, PAYOUTS_ENABLED: 'true' }, db)).fatal).toEqual([expect.stringMatching(/missing DARAJA_CONSUMER_KEY.*DARAJA_B2C_SHORTCODE/)]);
-    expect((await preflight({ ...base, TWILIO_ACCOUNT_SID: 'AC1' }, db)).warnings).toEqual([expect.stringMatching(/TWILIO_\* is only partly set/)]);
+    expect((await preflight({ ...base, AFRICASTALKING_USERNAME: 'sandbox' }, db)).warnings).toEqual([expect.stringMatching(/AFRICASTALKING_\* is only partly set/)]);
   });
 });
 
@@ -427,7 +427,7 @@ describe('access and listing', () => {
 });
 
 describe('notifier failure isolation', () => {
-  it('Twilio failing: the activation still commits and the failure is counted', async () => {
+  it('SMS failing: the activation still commits and the failure is counted', async () => {
     notifyFails = true;
     const before = metrics.payouts.alertsFailed;
     const id = (await register()).body.destination.destination_id;
@@ -437,32 +437,38 @@ describe('notifier failure isolation', () => {
     expect(metrics.payouts.alertsFailed - before).toBe(2);
   });
 
-  it('TwilioWhatsAppNotifier: Basic auth, form body to whatsapp:+2547…; an error or a 5 s timeout throws', async () => {
+  it("AfricasTalkingSmsNotifier: apiKey header, form body to +2547…; HTTP error, rejected recipient or 5 s timeout throws", async () => {
     const calls: any[] = [];
-    let mode: 'ok' | 'error' | 'hang' = 'ok';
+    let mode: 'ok' | 'http' | 'rejected' | 'hang' = 'ok';
     const fetchImpl = jest.fn(async (url: string, init: any) => {
       calls.push({ url, init });
       if (mode === 'hang') return new Promise<never>((_r, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted'))));
-      return { ok: mode === 'ok', status: mode === 'ok' ? 201 : 401 };
+      const statusCode = mode === 'rejected' ? 403 : 101;
+      return { ok: mode !== 'http', status: mode === 'http' ? 401 : 201, json: async () => ({ SMSMessageData: { Recipients: [{ statusCode, status: mode === 'rejected' ? 'InvalidPhoneNumber' : 'Success' }] } }) };
     });
-    const n = new TwilioWhatsAppNotifier({ accountSid: 'AC123', authToken: 'auth-secret', from: 'whatsapp:+14155238886', timeoutMs: 50 }, fetchImpl as any);
-    await n.send(PHONE, 'hello');
-    expect(calls[0].url).toBe('https://api.twilio.com/2010-04-01/Accounts/AC123/Messages.json');
-    expect(calls[0].init.headers.Authorization).toBe(`Basic ${Buffer.from('AC123:auth-secret').toString('base64')}`);
-    expect(Object.fromEntries(new URLSearchParams(calls[0].init.body))).toEqual({ From: 'whatsapp:+14155238886', To: `whatsapp:+${PHONE}`, Body: 'hello' });
-    mode = 'error';
-    await expect(n.send(PHONE, 'x')).rejects.toThrow('Twilio HTTP 401');
+    const live = new AfricasTalkingSmsNotifier({ username: 'salesmesh', apiKey: 'at-secret', senderId: 'SALESMESH', timeoutMs: 50 }, fetchImpl as any);
+    await live.send(PHONE, 'hello');
+    expect(calls[0].url).toBe('https://api.africastalking.com/version1/messaging');
+    expect(calls[0].init.headers.apiKey).toBe('at-secret');
+    expect(Object.fromEntries(new URLSearchParams(calls[0].init.body))).toEqual({ username: 'salesmesh', to: `+${PHONE}`, message: 'hello', from: 'SALESMESH' });
+    await new AfricasTalkingSmsNotifier({ username: 'sandbox', apiKey: 'k', timeoutMs: 50 }, fetchImpl as any).send(PHONE, 'hi');
+    expect(calls[1].url).toBe('https://api.sandbox.africastalking.com/version1/messaging');
+    expect(new URLSearchParams(calls[1].init.body).has('from')).toBe(false);
+    mode = 'http';
+    await expect(live.send(PHONE, 'x')).rejects.toThrow("Africa's Talking HTTP 401");
+    mode = 'rejected';
+    await expect(live.send(PHONE, 'x')).rejects.toThrow("Africa's Talking rejected: 403 InvalidPhoneNumber");
     mode = 'hang';
-    await expect(n.send(PHONE, 'x')).rejects.toThrow('Twilio timeout');
+    await expect(live.send(PHONE, 'x')).rejects.toThrow("Africa's Talking timeout");
     const m = new GatewayMetrics();
-    expect(await notifySafely(n, PHONE, 'x', m)).toBe(false);
+    expect(await notifySafely(live, PHONE, 'x', m)).toBe(false);
     expect(m.payouts.alertsFailed).toBe(1);
   });
 
-  it('notifierFromEnv: Twilio only when all three TWILIO_* are set', () => {
+  it("notifierFromEnv: Africa's Talking only when the username and API key are set", () => {
     expect(notifierFromEnv({})).toBeInstanceOf(LogNotifier);
-    expect(notifierFromEnv({ TWILIO_ACCOUNT_SID: 'AC1', TWILIO_AUTH_TOKEN: 't' })).toBeInstanceOf(LogNotifier);
-    expect(notifierFromEnv({ TWILIO_ACCOUNT_SID: 'AC1', TWILIO_AUTH_TOKEN: 't', TWILIO_WHATSAPP_FROM: '+14155238886' })).toBeInstanceOf(TwilioWhatsAppNotifier);
+    expect(notifierFromEnv({ AFRICASTALKING_USERNAME: 'sandbox' })).toBeInstanceOf(LogNotifier);
+    expect(notifierFromEnv({ AFRICASTALKING_USERNAME: 'sandbox', AFRICASTALKING_API_KEY: 'k' })).toBeInstanceOf(AfricasTalkingSmsNotifier);
   });
 });
 
