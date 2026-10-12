@@ -67,3 +67,6 @@ keys/
 reconcile-evidence/
 
 .claude/
+
+# UFAA holder reports (names, phone numbers)
+ufaa-returns/

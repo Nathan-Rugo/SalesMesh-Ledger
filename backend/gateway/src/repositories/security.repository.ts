@@ -29,7 +29,7 @@ export async function insertSecurityEvent(
 
 /**
  * Forces the receipt's escrow to QUARANTINED with security_hold (self-heal never touches it).
- * A RELEASED escrow is never changed (nothing is clawed back automatically): it is returned so
+ * A RELEASED (or REMITTED: transferred to UFAA) escrow is never changed (nothing is clawed back automatically): it is returned so
  * the caller can record an exception for an operator. A CLAIMED escrow (its payout is in flight)
  * keeps its status but gets security_hold, and is returned too: if the payout is PAID the money is
  * gone (CLAWBACK_DUE); if it FAILS the escrow becomes QUARANTINED. The agent's rating is penalised once per
@@ -47,12 +47,12 @@ export async function securityHoldReceipt(
             security_hold = TRUE, rescore_claimed_at = NULL, rescore_claim_token = NULL
        FROM transactions t
       WHERE t.transaction_id = e.transaction_id AND t.mpesa_receipt_id = $1
-        AND e.escrow_status <> 'RELEASED' AND NOT (e.escrow_status IN ('QUARANTINED', 'CLAIMED') AND e.security_hold)`,
+        AND e.escrow_status NOT IN ('RELEASED', 'REMITTED') AND NOT (e.escrow_status IN ('QUARANTINED', 'CLAIMED') AND e.security_hold)`,
     [receipt]
   );
   const { rows } = await db.query<{ escrow_id: string; amount: string }>(
     `SELECT e.escrow_id, t.amount::text AS amount FROM escrow_accounts e JOIN transactions t USING (transaction_id)
-      WHERE t.mpesa_receipt_id = $1 AND e.escrow_status IN ('RELEASED', 'CLAIMED')`,
+      WHERE t.mpesa_receipt_id = $1 AND e.escrow_status IN ('RELEASED', 'CLAIMED', 'REMITTED')`,
     [receipt]
   );
   await penaliseReceipt(db, receipt);

@@ -466,6 +466,31 @@ describeDb('Daraja reconciliation (real Postgres)', () => {
     expect((await db.pool.query(`SELECT kind, mpesa_receipt_id FROM reconciliation_exceptions`)).rows).toEqual([{ kind: 'CLAWBACK_DUE', mpesa_receipt_id: released }]);
   });
 
+  it('reversal of a REMITTED escrow (with UFAA): stays REMITTED, no security hold, return kept; one CLAWBACK_DUE naming UFAA', async () => {
+    const ag = code();
+    await seedAgent(db.pool, ag);
+    const t = new Date(Date.now() - 7_200_000);
+    const remitted = receipt('VU');
+    await run(statement([{ receipt: remitted, completion: t, paidIn: '300.00', ac: ag }]));
+    await drain();
+    const { rows: [ret] } = await db.pool.query(`INSERT INTO ufaa_returns (period_end, status) VALUES ('2026-06-30', 'REMITTED') RETURNING return_id`);
+    await db.pool.query(
+      `UPDATE escrow_accounts e SET escrow_status = 'REMITTED', ufaa_return_id = $2 FROM transactions t WHERE t.transaction_id = e.transaction_id AND t.mpesa_receipt_id = $1`,
+      [remitted, ret.return_id]
+    );
+    const report = await run(statement([
+      { receipt: receipt('RU'), completion: new Date(Date.now() - 3_600_000), withdrawn: '-300.00', details: 'Reversal', reason: 'Reversal', linked: remitted, ac: ag },
+    ], { from: new Date(Date.now() - 5_400_000) }));
+    expect(report.counts).toMatchObject({ reversalsOfKnown: 1, clawbacksDue: 1 });
+    const { rows: [e] } = await db.pool.query(
+      `SELECT e.escrow_status, e.security_hold, e.ufaa_return_id FROM escrow_accounts e JOIN transactions t USING (transaction_id) WHERE t.mpesa_receipt_id = $1`,
+      [remitted]
+    );
+    expect(e).toEqual({ escrow_status: 'REMITTED', security_hold: false, ufaa_return_id: ret.return_id });
+    const { rows: ex } = await db.pool.query(`SELECT kind, mpesa_receipt_id, detail FROM reconciliation_exceptions`);
+    expect(ex).toEqual([{ kind: 'CLAWBACK_DUE', mpesa_receipt_id: remitted, detail: expect.stringMatching(/REMITTED \(with UFAA\)/) }]);
+  });
+
   it('binding: ambiguous (2 candidates) never binds; a single FAILED match → STK_STATUS_CONFLICT, held UNRESOLVED; masked phone matches only its fingerprint', async () => {
     const ag = code();
     const agentId = await seedAgent(db.pool, ag);

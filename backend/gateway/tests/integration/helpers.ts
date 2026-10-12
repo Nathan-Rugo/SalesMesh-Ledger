@@ -38,6 +38,7 @@ export const MIGRATION_005 = fs.readFileSync(
 );
 export const MIGRATION_006 = fs.readFileSync(path.join(REPO_ROOT, 'infra', 'scripts', 'migrations', '006_payout_claims.sql'), 'utf-8');
 export const MIGRATION_007 = fs.readFileSync(path.join(REPO_ROOT, 'infra', 'scripts', 'migrations', '007_unclaimed_reminders.sql'), 'utf-8');
+export const MIGRATION_008 = fs.readFileSync(path.join(REPO_ROOT, 'infra', 'scripts', 'migrations', '008_ufaa_remittance.sql'), 'utf-8');
 export const LEGACY_SQL = fs.readFileSync(path.join(__dirname, 'fixtures', 'legacy_init_db.sql'), 'utf-8');
 
 function urlFor(db: string): string {

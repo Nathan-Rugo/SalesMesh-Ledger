@@ -1,10 +1,10 @@
 /**
- * Migrations 001–007 against real Postgres: legacy schema + 001 + … + 007 == fresh init schema,
+ * Migrations 001–008 against real Postgres: legacy schema + 001 + … + 008 == fresh init schema,
  * legacy rows are backfilled, and re-running (or running on a fresh install) is a no-op.
  */
 
 import type { Pool } from 'pg';
-import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006, MIGRATION_007, type TestDb } from './helpers';
+import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006, MIGRATION_007, MIGRATION_008, type TestDb } from './helpers';
 
 jest.setTimeout(60_000);
 
@@ -22,7 +22,7 @@ async function shape(pool: Pool) {
   return { cols: cols.rows, idx: idx.rows, cons: consSorted };
 }
 
-describeDb('migrations 001_settlement_pipeline … 007_unclaimed_reminders', () => {
+describeDb('migrations 001_settlement_pipeline … 008_ufaa_remittance', () => {
   let legacy: TestDb;
   let fresh: TestDb;
 
@@ -139,6 +139,14 @@ describeDb('migrations 001_settlement_pipeline … 007_unclaimed_reminders', () 
     expect((await p.query(`SELECT unclaimed_reminder_stage FROM escrow_accounts`)).rows[0].unclaimed_reminder_stage).toBe(0);
     await expect(p.query(`UPDATE escrow_accounts SET unclaimed_reminder_stage = 4`)).rejects.toThrow(/escrow_accounts_unclaimed_reminder_stage/);
 
+    // 008: REMITTED escrows need their UFAA return; returns are per 30 June; UFAA_* events exist.
+    await p.query(MIGRATION_008);
+    await expect(p.query(`UPDATE escrow_accounts SET escrow_status = 'REMITTED'`)).rejects.toThrow(/escrow_accounts_remitted_return/);
+    await expect(p.query(`INSERT INTO ufaa_returns (period_end) VALUES ('2026-07-31')`)).rejects.toThrow(/ufaa_returns_period_end_30_june/);
+    const { rows: [ret] } = await p.query(`INSERT INTO ufaa_returns (period_end) VALUES ('2026-06-30') RETURNING return_id`);
+    await p.query(`UPDATE escrow_accounts SET escrow_status = 'REMITTED', ufaa_return_id = $1`, [ret.return_id]);
+    await p.query(`INSERT INTO security_events (event_type, subject_user_id, detail) VALUES ('UFAA_REMITTED', $1, 'x')`, [u.user_id]);
+
     const [a1, b1] = await Promise.all([shape(legacy.pool), shape(fresh.pool)]);
     expect(a1.cols).toEqual(b1.cols);
     expect(a1.idx).toEqual(b1.idx);
@@ -154,6 +162,7 @@ describeDb('migrations 001_settlement_pipeline … 007_unclaimed_reminders', () 
     await legacy.pool.query(MIGRATION_005);
     await legacy.pool.query(MIGRATION_006);
     await legacy.pool.query(MIGRATION_007);
+    await legacy.pool.query(MIGRATION_008);
     expect(await shape(legacy.pool)).toEqual(before);
 
     const freshBefore = await shape(fresh.pool);
@@ -164,9 +173,10 @@ describeDb('migrations 001_settlement_pipeline … 007_unclaimed_reminders', () 
     await fresh.pool.query(MIGRATION_005);
     await fresh.pool.query(MIGRATION_006);
     await fresh.pool.query(MIGRATION_007);
+    await fresh.pool.query(MIGRATION_008);
     expect(await shape(fresh.pool)).toEqual(freshBefore);
     const { rows } = await fresh.pool.query(`SELECT version FROM schema_migrations ORDER BY version`);
-    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation', '003_reconciliation', '004_trust_scores', '005_payout_destinations', '006_payout_claims', '007_unclaimed_reminders']);
+    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation', '003_reconciliation', '004_trust_scores', '005_payout_destinations', '006_payout_claims', '007_unclaimed_reminders', '008_ufaa_remittance']);
   });
 
   it('enforces the agent_code CHECK (upper-case, trimmed)', async () => {

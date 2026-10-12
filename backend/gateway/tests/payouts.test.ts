@@ -12,7 +12,7 @@ import express from 'express';
 import { signAccessToken } from '../src/auth/tokens';
 import { PayoutController } from '../src/controllers/payout.controller';
 import { B2cClient, parseB2cResult, parseTransactionStatusResult } from '../src/daraja/client';
-import { consentHash, DISCLOSURES, payoutConfig, PayoutConfigError, splitClaim } from '../src/domain/payout';
+import { consentHash, DISCLOSURES, payoutConfig, PayoutConfigError, splitClaim, ufaaDormancyYears } from '../src/domain/payout';
 import { preflight } from '../src/index';
 import { createPayoutRouter } from '../src/routes/payout.routes';
 import webhookRoutes from '../src/routes/webhook.routes';
@@ -81,6 +81,12 @@ describe('PAYOUT_* config', () => {
       { PAYOUT_REMINDER_HOURS: '20,8' }, { PAYOUT_REMINDER_HOURS: '8' }, { PAYOUT_REMINDER_HOURS: '8,25' }]) {
       expect(() => payoutConfig(bad)).toThrow(PayoutConfigError);
     }
+  });
+
+  it('UFAA_DORMANCY_YEARS: default 1 (the Act), env value, invalid refused', () => {
+    expect(ufaaDormancyYears({})).toBe(1);
+    expect(ufaaDormancyYears({ UFAA_DORMANCY_YEARS: ' 2 ' })).toBe(2);
+    for (const v of ['0', '-1', '1.5', 'x']) expect(() => ufaaDormancyYears({ UFAA_DORMANCY_YEARS: v })).toThrow(PayoutConfigError);
   });
 
   it('preflight refuses a bad PAYOUT_* value only while PAYOUTS_ENABLED=true', async () => {
