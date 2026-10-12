@@ -63,6 +63,7 @@ import { spoolService } from '../services/spool.service';
 import { settlementWorker } from '../workers/settlement.worker';
 import { parseB2cResult } from '../daraja/client';
 import { payoutDestinationService } from '../services/payout_destination.service';
+import { payoutService } from '../services/payout.service';
 
 const ACK = { ResultCode: 0, ResultDesc: 'Accepted' } as const;
 const RETRY_LATER = { ResultCode: 1, ResultDesc: 'Temporarily unavailable; retry' } as const;
@@ -394,9 +395,11 @@ class WebhookController {
   }
 
   /**
-   * POST /api/v1/mpesa/b2c/result/:token — the result of a payout-destination verification
-   * (spec gh-11). Applied at most once; unknown or repeated results are ACKed. 503 (Daraja
-   * retries) only when the result could not be recorded. The registered name is never logged.
+   * POST /api/v1/mpesa/b2c/result/:token — one URL for every B2C answer (spec gh-11), routed by
+   * its OriginatorConversationID: a payout (payout_id), a payout's Transaction Status query
+   * (status_query_id), else a payout-destination verification. Applied at most once; unknown or
+   * repeated results are ACKed. 503 (Daraja retries) only when the result could not be recorded.
+   * The registered name is never logged.
    */
   public async handleB2cResult(req: Request, res: Response): Promise<void> {
     const result = parseB2cResult(req.body);
@@ -406,6 +409,10 @@ class WebhookController {
       return;
     }
     try {
+      if (await payoutService.handleResult(req.body)) {
+        res.status(200).json(ACK);
+        return;
+      }
       const outcome = await payoutDestinationService.applyResult(result);
       if (outcome.kind !== 'applied') console.info(`[Webhook] B2C result ${outcome.kind} (ResultCode ${result.resultCode}) — ACK.`);
       res.status(200).json(ACK);
@@ -416,8 +423,9 @@ class WebhookController {
   }
 
   /**
-   * POST /api/v1/mpesa/b2c/timeout/:token — Daraja's queue timeout. Logged and ACKed only: the
-   * row stays PENDING_VERIFICATION until a result arrives or the expiry sweep (never a resend).
+   * POST /api/v1/mpesa/b2c/timeout/:token — Daraja's queue timeout. Logged and ACKed only, never a
+   * resend: a destination stays PENDING_VERIFICATION until a result arrives or the expiry sweep; a
+   * payout stays open until its result or the Transaction Status sweep decides it.
    */
   public handleB2cTimeout(req: Request, res: Response): void {
     const id = field(req.body, 'Result', 'OriginatorConversationID');

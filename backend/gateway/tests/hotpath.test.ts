@@ -234,7 +234,7 @@ describe('I/O matrix — hot path', () => {
     err.mockRestore();
     expect(mockIntake.get('OEI2AK4Q16')).toBe(original);
     expect(sql(/INSERT INTO security_events/)).toHaveLength(1);
-    expect(sql(/UPDATE escrow_accounts e\s+SET escrow_status = 'QUARANTINED', security_hold = TRUE/)).toHaveLength(1);
+    expect(sql(/UPDATE escrow_accounts e\s+SET escrow_status = CASE WHEN e.escrow_status = 'CLAIMED' THEN 'CLAIMED' ELSE 'QUARANTINED' END[\s\S]*security_hold = TRUE/)).toHaveLength(1);
   });
 
   it('Postgres down → 503, nothing ACKed, redacted payload spooled to Redis', async () => {
@@ -412,6 +412,8 @@ describe('/health/details observability', () => {
         return { rows: [{ paid_unconfirmed: 2, exhausted: 1, overdue: 5, oldest: 1800, last_import: new Date('2026-10-09T08:00:00Z') }], rowCount: 1 };
       }
       if (/FROM reconciliation_exceptions WHERE resolved_at IS NULL/.test(text)) return { rows: [{ kind: 'CLAWBACK_DUE', n: 2 }], rowCount: 1 };
+      // spec gh-11 part 2: payouts by status (only non-empty statuses come back)
+      if (/FROM payouts GROUP BY status/.test(text)) return { rows: [{ status: 'UNRESOLVED', n: 2 }], rowCount: 1 };
       if (/FROM reconciliation_runs WHERE NOT dry_run ORDER BY started_at DESC/.test(text)) {
         return { rows: [{ status: 'FAILED', started_at: new Date('2026-10-09T09:00:00Z'), finished_at: new Date('2026-10-09T09:01:00Z') }], rowCount: 1 };
       }
@@ -438,6 +440,7 @@ describe('/health/details observability', () => {
     });
     expect(res.body.circuitBreaker.state).toBe('CLOSED');
     expect(res.body.ml).toMatchObject({ timeoutMs: 500, timeoutRate: 0 });
+    expect(res.body.payoutsByStatus).toEqual({ SENT: 0, UNKNOWN: 0, PAID: 0, FAILED: 0, UNRESOLVED: 2 });
     expect(res.body).toHaveProperty('spoolDepth');
     expect(res.body).toHaveProperty('trust');
     expect(res.body.trust).toMatchObject({

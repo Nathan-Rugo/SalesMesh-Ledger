@@ -30,7 +30,9 @@ export async function insertSecurityEvent(
 /**
  * Forces the receipt's escrow to QUARANTINED with security_hold (self-heal never touches it).
  * A RELEASED escrow is never changed (nothing is clawed back automatically): it is returned so
- * the caller can record an exception for an operator. The agent's rating is penalised once per
+ * the caller can record an exception for an operator. A CLAIMED escrow (its payout is in flight)
+ * keeps its status but gets security_hold, and is returned too: if the payout is PAID the money is
+ * gone (CLAWBACK_DUE); if it FAILS the escrow becomes QUARANTINED. The agent's rating is penalised once per
  * security-hold event on the receipt (spec gh-23), whatever the escrow's status; the agent row is
  * locked last.
  */
@@ -40,16 +42,17 @@ export async function securityHoldReceipt(
 ): Promise<{ held: number; released: Array<{ escrowId: string; amount: string }> }> {
   const { rowCount } = await db.query(
     `UPDATE escrow_accounts e
-        SET escrow_status = 'QUARANTINED', security_hold = TRUE, quarantine_reason = 'security_hold',
-            rescore_claimed_at = NULL, rescore_claim_token = NULL
+        SET escrow_status = CASE WHEN e.escrow_status = 'CLAIMED' THEN 'CLAIMED' ELSE 'QUARANTINED' END,
+            quarantine_reason = CASE WHEN e.escrow_status = 'CLAIMED' THEN e.quarantine_reason ELSE 'security_hold' END,
+            security_hold = TRUE, rescore_claimed_at = NULL, rescore_claim_token = NULL
        FROM transactions t
       WHERE t.transaction_id = e.transaction_id AND t.mpesa_receipt_id = $1
-        AND e.escrow_status <> 'RELEASED' AND NOT (e.escrow_status = 'QUARANTINED' AND e.security_hold)`,
+        AND e.escrow_status <> 'RELEASED' AND NOT (e.escrow_status IN ('QUARANTINED', 'CLAIMED') AND e.security_hold)`,
     [receipt]
   );
   const { rows } = await db.query<{ escrow_id: string; amount: string }>(
     `SELECT e.escrow_id, t.amount::text AS amount FROM escrow_accounts e JOIN transactions t USING (transaction_id)
-      WHERE t.mpesa_receipt_id = $1 AND e.escrow_status = 'RELEASED'`,
+      WHERE t.mpesa_receipt_id = $1 AND e.escrow_status IN ('RELEASED', 'CLAIMED')`,
     [receipt]
   );
   await penaliseReceipt(db, receipt);
@@ -119,16 +122,7 @@ export async function recordPayloadMutation(
       incomingHash,
       detail: 'same receipt delivered with a different payload hash; original kept',
     });
-    await client.query(
-      `UPDATE escrow_accounts e
-          SET escrow_status = 'QUARANTINED', security_hold = TRUE, quarantine_reason = 'security_hold',
-              rescore_claimed_at = NULL, rescore_claim_token = NULL
-         FROM transactions t
-        WHERE t.transaction_id = e.transaction_id AND t.mpesa_receipt_id = $1
-          AND e.escrow_status <> 'RELEASED'`,
-      [receipt]
-    );
-    await penaliseReceipt(client, receipt);
+    await securityHoldReceipt(client, receipt);
   });
 }
 

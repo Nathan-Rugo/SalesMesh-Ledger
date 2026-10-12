@@ -25,11 +25,11 @@ const view = (d: DestinationRow) => ({
   created_at: d.createdAt.toISOString(),
 });
 
-const client = (req: Request): ClientInfo => ({ ip: req.ip ?? 'unknown', userAgent: req.get('user-agent') ?? undefined, deviceCookie: undefined });
-const pinOf = (req: Request): unknown => ((req.body ?? {}) as Record<string, unknown>).pin;
+export const client = (req: Request): ClientInfo => ({ ip: req.ip ?? 'unknown', userAgent: req.get('user-agent') ?? undefined, deviceCookie: undefined });
+export const pinOf = (req: Request): unknown => ((req.body ?? {}) as Record<string, unknown>).pin;
 
 /** The answers shared by every route: agent problems and PIN confirmation failures. */
-function common(res: Response, kind: string, retryAfterS: number | null = null): boolean {
+export function common(res: Response, kind: string, retryAfterS: number | null = null): boolean {
   switch (kind) {
     case 'not_provisioned':
       res.status(409).json({ error: 'agent_not_provisioned' });

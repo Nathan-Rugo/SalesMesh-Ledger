@@ -3,7 +3,8 @@
 -- tables (mpesa_callbacks, stk_requests, security_events) from spec gh-6, the auth / STK
 -- initiation tables (user_credentials, refresh_tokens, auth_events) from spec gh-5, and the Daraja
 -- reconciliation tables (reconciliation_runs, reconciliation_exceptions) from spec gh-6-recon, and
--- the trust tables (trust_config_snapshots, agent_trust_events, extended trust_scores) from spec gh-23.
+-- the trust tables (trust_config_snapshots, agent_trust_events, extended trust_scores) from spec gh-23,
+-- and payout destinations / agent-claimed payouts (payout_destinations, payouts) from spec gh-11.
 --
 -- Existing databases are brought to this shape by infra/scripts/migrations/*.sql; a fresh
 -- install records those migrations as already applied (see schema_migrations at the end).
@@ -96,6 +97,9 @@ CREATE TABLE IF NOT EXISTS sales_agents (
     -- data dictionary's 1.000 on purpose: trust is earned, never granted on sign-up.
     agent_trust_rating NUMERIC(7,6) NOT NULL DEFAULT 0.5 CHECK (agent_trust_rating BETWEEN 0.000 AND 1.000),
     scored_txn_count INTEGER NOT NULL DEFAULT 0,      -- model-scored verifications with a trust row
+    -- Shilling-rounding remainder of the last PAID payout, carried into the next claim (spec gh-11).
+    payout_carry_cents INTEGER NOT NULL DEFAULT 0
+        CONSTRAINT sales_agents_payout_carry_cents CHECK (payout_carry_cents BETWEEN 0 AND 99),
     agent_code VARCHAR(32) UNIQUE
         CONSTRAINT sales_agents_agent_code_normalised CHECK (agent_code = UPPER(BTRIM(agent_code)) AND agent_code <> '')
         -- It is also the Daraja AccountReference, which is at most 12 characters.
@@ -231,7 +235,7 @@ CREATE TABLE IF NOT EXISTS security_events (
         'ADMIN_UNLOCK', 'ADMIN_DISABLE', 'ADMIN_PIN_RESET',
         'RECONCILE_AMOUNT_MISMATCH', 'PAYMENT_REVERSED', 'RECONCILED_CALLBACK_LATE',
         'RECONCILE_ATTRIBUTION_CONFLICT', 'RECONCILE_NOT_ON_STATEMENT', 'STK_STATUS_CONFLICT',
-        'PAYOUT_DESTINATION_CHANGED')),
+        'PAYOUT_DESTINATION_CHANGED', 'PAYOUT_STATUS_CHANGED', 'PAYOUT_NAME_MISMATCH')),
     mpesa_receipt_id VARCHAR(50),
     subject_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
     family_id UUID,
@@ -341,13 +345,76 @@ CREATE TABLE IF NOT EXISTS agent_trust_events (
 );
 CREATE INDEX IF NOT EXISTS agent_trust_events_agent_idx ON agent_trust_events (agent_id, cause, created_at);
 
+-- Table 13: PAYOUT_DESTINATIONS (spec gh-11). An agent's personal M-Pesa payout destination: their
+-- login phone, proven theirs by a KES 1.00 B2C payment whose registered name must match full_name.
+-- The phone is pinned on the row, so after a phone change a replacement waits out a cooling-off.
+CREATE TABLE IF NOT EXISTS payout_destinations (
+    destination_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),  -- also the B2C OriginatorConversationID
+    agent_id UUID NOT NULL REFERENCES sales_agents(agent_id) ON DELETE RESTRICT,
+    msisdn VARCHAR(12) NOT NULL CHECK (msisdn ~ '^254[17][0-9]{8}$'),
+    status VARCHAR(25) NOT NULL DEFAULT 'PENDING_VERIFICATION' CHECK (status IN (
+        'PENDING_VERIFICATION', 'COOLING_OFF', 'ACTIVE', 'SUPERSEDED', 'REJECTED', 'EXPIRED', 'CANCELLED')),
+    reject_reason VARCHAR(40),
+    conversation_id VARCHAR(100),
+    result_code VARCHAR(20),
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    verified_at TIMESTAMPTZ,
+    cooling_off_until TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT payout_destinations_cooling_off_until CHECK (status <> 'COOLING_OFF' OR cooling_off_until IS NOT NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS payout_destinations_one_active
+    ON payout_destinations (agent_id) WHERE status = 'ACTIVE';
+CREATE UNIQUE INDEX IF NOT EXISTS payout_destinations_one_in_flight
+    ON payout_destinations (agent_id) WHERE status IN ('PENDING_VERIFICATION', 'COOLING_OFF');
+
+-- Table 14: PAYOUTS (spec gh-11, part 2). One agent-claimed B2C payout of the whole claimable balance
+-- (matured HELD escrows, oldest first, up to PAYOUT_MAX_AMOUNT) to the agent's ACTIVE destination.
+-- payout_id is the B2C OriginatorConversationID, recorded before the call; an ambiguous send is
+-- UNKNOWN and recovered by Transaction Status, never resent. amount = floor((gross + carry_in) / 100).
+CREATE TABLE IF NOT EXISTS payouts (
+    payout_id UUID PRIMARY KEY,                       -- also the B2C OriginatorConversationID
+    agent_id UUID NOT NULL REFERENCES sales_agents(agent_id) ON DELETE RESTRICT,
+    destination_id UUID NOT NULL REFERENCES payout_destinations(destination_id) ON DELETE RESTRICT,
+    msisdn VARCHAR(12) NOT NULL CHECK (msisdn ~ '^254[17][0-9]{8}$'),
+    amount INTEGER NOT NULL CHECK (amount > 0),        -- whole shillings sent
+    gross_cents BIGINT NOT NULL CHECK (gross_cents > 0),
+    carry_in_cents INTEGER NOT NULL CHECK (carry_in_cents BETWEEN 0 AND 99),
+    carry_out_cents INTEGER NOT NULL CHECK (carry_out_cents BETWEEN 0 AND 99),
+    status VARCHAR(12) NOT NULL DEFAULT 'SENT' CHECK (status IN ('SENT', 'UNKNOWN', 'PAID', 'FAILED', 'UNRESOLVED')),
+    failure_reason VARCHAR(40),
+    disclosure_version VARCHAR(20) NOT NULL,
+    consent_hash VARCHAR(64) NOT NULL,                -- SHA-256 of the accepted Fuliza disclosure (AuthorisePayout, #9)
+    accepted_at TIMESTAMPTZ NOT NULL,
+    conversation_id VARCHAR(100),
+    receipt VARCHAR(50) UNIQUE,
+    result_code VARCHAR(20),
+    status_query_ids UUID[] NOT NULL DEFAULT '{}', -- every Transaction Status query's OriginatorConversationID (late answers still match)
+    status_attempts INTEGER NOT NULL DEFAULT 0,
+    next_status_at TIMESTAMPTZ,
+    status_claimed_at TIMESTAMPTZ,
+    status_claim_token UUID,
+    last_status_result TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ,
+    CONSTRAINT payouts_carry_arithmetic CHECK (gross_cents + carry_in_cents = amount::bigint * 100 + carry_out_cents)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS payouts_one_open ON payouts (agent_id) WHERE status IN ('SENT', 'UNKNOWN', 'UNRESOLVED');
+CREATE INDEX IF NOT EXISTS payouts_agent_idx ON payouts (agent_id, created_at);
+CREATE INDEX IF NOT EXISTS payouts_status_check_idx ON payouts (created_at) WHERE status IN ('SENT', 'UNKNOWN');
+CREATE INDEX IF NOT EXISTS payouts_status_query_ids_idx ON payouts USING GIN (status_query_ids);
+
 -- Table 8: ESCROW_ACCOUNTS
 CREATE TABLE IF NOT EXISTS escrow_accounts (
     escrow_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     transaction_id UUID UNIQUE NOT NULL REFERENCES transactions(transaction_id) ON DELETE RESTRICT,
     gross_commission DECIMAL(10,2) NOT NULL,
     hold_period_hours INTEGER NOT NULL DEFAULT 24,
-    escrow_status VARCHAR(30) NOT NULL CHECK (escrow_status IN ('HELD', 'QUARANTINED', 'RELEASED')),
+    -- CLAIMED: matured and included in a payout still in flight (payout_id); RELEASED once PAID.
+    escrow_status VARCHAR(30) NOT NULL CHECK (escrow_status IN ('HELD', 'CLAIMED', 'QUARANTINED', 'RELEASED')),
+    payout_id UUID REFERENCES payouts(payout_id) ON DELETE RESTRICT,
     release_due_at TIMESTAMPTZ NOT NULL,
     security_hold BOOLEAN NOT NULL DEFAULT FALSE,    -- payload mutation: self-heal never touches it
     rescore_attempts INTEGER NOT NULL DEFAULT 0,
@@ -357,13 +424,15 @@ CREATE TABLE IF NOT EXISTS escrow_accounts (
     hold_seconds INTEGER,                            -- T_hold (spec gh-23); NULL on legacy rows
     quarantine_reason VARCHAR(40)                    -- why a QUARANTINED escrow is quarantined (NULL while HELD)
         CONSTRAINT escrow_accounts_quarantine_reason_check CHECK (quarantine_reason IN (
-        'security_hold', 'fail_safe', 'model_decision', 'trust_below_threshold', 'trust_input_invalid'))
+        'security_hold', 'fail_safe', 'model_decision', 'trust_below_threshold', 'trust_input_invalid')),
+    CONSTRAINT escrow_accounts_claimed_payout CHECK (escrow_status <> 'CLAIMED' OR payout_id IS NOT NULL)
 );
+CREATE INDEX IF NOT EXISTS escrow_accounts_payout_idx ON escrow_accounts (payout_id) WHERE payout_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS escrow_accounts_rescore_idx
     ON escrow_accounts (next_rescore_at) WHERE escrow_status = 'QUARANTINED' AND NOT security_hold;
 -- Trust maturity sweep (spec gh-23): matured holds decided under the trust regime.
 CREATE INDEX IF NOT EXISTS escrow_accounts_matured_idx
-    ON escrow_accounts (release_due_at) WHERE escrow_status IN ('HELD', 'RELEASED') AND hold_seconds IS NOT NULL;
+    ON escrow_accounts (release_due_at) WHERE escrow_status IN ('HELD', 'CLAIMED', 'RELEASED') AND hold_seconds IS NOT NULL;
 
 -- Reconciliation exceptions an operator must act on (spec gh-6-recon): a reversal of a payment whose
 -- escrow was already RELEASED (CLAWBACK_DUE), or a RELEASED payment missing from the statement.
@@ -409,40 +478,9 @@ CREATE TABLE IF NOT EXISTS tax_deductions (
     net_payout_amount DECIMAL(10,2) NOT NULL
 );
 
--- Table 12: PAYOUT_DISBURSEMENTS
-CREATE TABLE IF NOT EXISTS payout_disbursements (
-    payout_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    escrow_id UUID NOT NULL REFERENCES escrow_accounts(escrow_id) ON DELETE RESTRICT,
-    conversation_id VARCHAR(100) UNIQUE NOT NULL,
-    status VARCHAR(30) NOT NULL CHECK (status IN ('SUCCESS', 'FAILED', 'REVERSED')),
-    disbursed_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
--- Table 13: PAYOUT_DESTINATIONS (spec gh-11). An agent's personal M-Pesa payout destination: their
--- login phone, proven theirs by a KES 1.00 B2C payment whose registered name must match full_name.
--- The phone is pinned on the row, so after a phone change a replacement waits out a cooling-off.
-CREATE TABLE IF NOT EXISTS payout_destinations (
-    destination_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),  -- also the B2C OriginatorConversationID
-    agent_id UUID NOT NULL REFERENCES sales_agents(agent_id) ON DELETE RESTRICT,
-    msisdn VARCHAR(12) NOT NULL CHECK (msisdn ~ '^254[17][0-9]{8}$'),
-    status VARCHAR(25) NOT NULL DEFAULT 'PENDING_VERIFICATION' CHECK (status IN (
-        'PENDING_VERIFICATION', 'COOLING_OFF', 'ACTIVE', 'SUPERSEDED', 'REJECTED', 'EXPIRED', 'CANCELLED')),
-    reject_reason VARCHAR(40),
-    conversation_id VARCHAR(100),
-    result_code VARCHAR(20),
-    sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    verified_at TIMESTAMPTZ,
-    cooling_off_until TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT payout_destinations_cooling_off_until CHECK (status <> 'COOLING_OFF' OR cooling_off_until IS NOT NULL)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS payout_destinations_one_active
-    ON payout_destinations (agent_id) WHERE status = 'ACTIVE';
-CREATE UNIQUE INDEX IF NOT EXISTS payout_destinations_one_in_flight
-    ON payout_destinations (agent_id) WHERE status IN ('PENDING_VERIFICATION', 'COOLING_OFF');
+-- Table 12 (PAYOUT_DISBURSEMENTS) was an unused per-escrow placeholder, dropped by migration 006; see payouts.
 
 -- A fresh install already has every migration's shape.
 INSERT INTO schema_migrations (version) VALUES ('001_settlement_pipeline'), ('002_auth_stk_initiation'), ('003_reconciliation'),
-                                               ('004_trust_scores'), ('005_payout_destinations')
+                                               ('004_trust_scores'), ('005_payout_destinations'), ('006_payout_claims')
     ON CONFLICT (version) DO NOTHING;

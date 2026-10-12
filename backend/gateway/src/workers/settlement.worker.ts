@@ -24,6 +24,7 @@ import { assertPiiKey } from '../config/pii';
 import { field, ownErrorCode, type JsonRecord } from '../domain/unknown';
 import { settlementWorkerConfig, type SettlementWorkerConfig } from '../config/worker';
 import { payoutDestinationService, payoutsEnabled, type PayoutDestinationService } from '../services/payout_destination.service';
+import { payoutService, type PayoutService } from '../services/payout.service';
 import {
   CallbackParseError,
   extractIngress,
@@ -96,6 +97,8 @@ export interface SettlementWorkerDeps {
   config?: Partial<SettlementWorkerConfig>;
   /** Payout-destination promotion / expiry sweep (spec gh-11); runs only while PAYOUTS_ENABLED=true. */
   payouts?: Pick<PayoutDestinationService, 'sweep'>;
+  /** Payout Transaction Status recovery (spec gh-11, part 2); runs only while PAYOUTS_ENABLED=true. */
+  payoutClaims?: Pick<PayoutService, 'sweep'>;
 }
 
 const isUniqueViolation = (e: unknown, constraint?: string): boolean =>
@@ -108,6 +111,7 @@ export class SettlementWorker {
   private readonly spool: Pick<SpoolService, 'peek' | 'remove'> | null;
   readonly config: SettlementWorkerConfig;
   private readonly payouts: Pick<PayoutDestinationService, 'sweep'>;
+  private readonly payoutClaims: Pick<PayoutService, 'sweep'>;
 
   private running = false;
   private loopPromise: Promise<void> | null = null;
@@ -121,6 +125,7 @@ export class SettlementWorker {
     this.escrow = deps.escrow ?? (deps.pool ? new EscrowService(deps.pool) : escrowService);
     this.spool = deps.spool === undefined ? spoolService : deps.spool;
     this.payouts = deps.payouts ?? payoutDestinationService;
+    this.payoutClaims = deps.payoutClaims ?? payoutService;
     this.config = { ...settlementWorkerConfig(), ...deps.config };
   }
 
@@ -202,6 +207,7 @@ export class SettlementWorker {
     await this.creditMaturedHolds().catch((e) => console.error('[SettlementWorker] trust maturity sweep failed:', (e as Error).message));
     if (payoutsEnabled()) {
       await this.payouts.sweep().catch((e) => console.error('[SettlementWorker] payout-destination sweep failed:', (e as Error).message));
+      await this.payoutClaims.sweep().catch((e) => console.error('[SettlementWorker] payout status sweep failed:', (e as Error).message));
     }
   }
 
