@@ -78,6 +78,23 @@ router.post(
 );
 
 /**
+ * POST /api/v1/mpesa/b2c/result/:token and /timeout/:token
+ * Daraja B2C result and queue-timeout callbacks (payout-destination verification, spec gh-11).
+ */
+router.post(
+  '/api/v1/mpesa/b2c/result/:token',
+  verifySourceIp,
+  verifyCallbackToken,
+  parseJson,
+  (req: Request, res: Response, next: NextFunction) => {
+    webhookController.handleB2cResult(req, res).catch(next);
+  }
+);
+router.post('/api/v1/mpesa/b2c/timeout/:token', verifySourceIp, verifyCallbackToken, parseJson, (req: Request, res: Response) => {
+  webhookController.handleB2cTimeout(req, res);
+});
+
+/**
  * Malformed or oversized JSON (body-parser errors, `err.type` "entity.*"): answer in Daraja's
  * terms without logging any payload bytes. Callbacks are ACKed and dropped (a retry cannot fix
  * them); validation requests are rejected before any money moves.

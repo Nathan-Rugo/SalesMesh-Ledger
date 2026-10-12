@@ -19,6 +19,7 @@
     "keys:generate": "node dist/scripts/keys-generate.js",
     "reconcile:import": "node dist/scripts/reconcile-import.js",
     "trust:adjust": "node dist/scripts/trust-adjust.js",
+    "payout:cancel": "node dist/scripts/payout-cancel.js",
     "lint:fix": "eslint . --fix"
   },
   "dependencies": {

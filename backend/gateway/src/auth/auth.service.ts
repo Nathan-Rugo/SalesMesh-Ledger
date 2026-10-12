@@ -80,6 +80,12 @@ export type PinChangeResult =
   | { kind: 'throttled'; retryAfterS: number | null }
   | { kind: 'unavailable' };
 
+export type PinConfirmResult =
+  | { kind: 'ok'; phoneNumber: string }
+  | { kind: 'invalid' }
+  | { kind: 'throttled'; retryAfterS: number | null }
+  | { kind: 'unavailable' };
+
 export const hashRefreshToken = (token: string): string =>
   `sha256:${crypto.createHash('sha256').update(token, 'utf-8').digest('hex')}`;
 
@@ -284,6 +290,41 @@ export class AuthService {
     });
     void audit('PIN_CHANGED', null);
     return { kind: 'ok', session };
+  }
+
+  // ── PIN confirmation (spec gh-11) ────────────────────────────────────────
+
+  /**
+   * Confirms a sensitive action with the user's PIN: the same reserve → verify → countFailure /
+   * release sequence as changePin, so a wrong PIN counts toward the login lockout. Fails closed
+   * (unavailable) when the throttle cannot answer.
+   */
+  async confirmPin(userId: string, pin: unknown, client: ClientInfo): Promise<PinConfirmResult> {
+    // No PIN at all (e.g. a bodiless DELETE) is not a guess: never reserved or counted.
+    if (typeof pin !== 'string' || pin.length === 0) return { kind: 'invalid' };
+    const user = await findUserById(this.db, userId);
+    if (!user || user.disabled) return { kind: 'invalid' };
+    const subject = this.subject(user.phoneNumber, client);
+
+    let reservation: Reservation;
+    try {
+      const verdict = await this.throttle.reserve(subject);
+      if (!verdict.allowed) return { kind: 'throttled', retryAfterS: verdict.retryAfterS };
+      reservation = verdict.reservation;
+    } catch (error) {
+      return this.unavailable(error);
+    }
+
+    const ok = await verifyPin(typeof pin === 'string' ? pin : '', user.credential).catch(async (error) => {
+      await this.release(reservation);
+      throw error;
+    });
+    if (!ok) {
+      await this.countFailure(reservation, userId);
+      return { kind: 'invalid' };
+    }
+    await this.release(reservation);
+    return { kind: 'ok', phoneNumber: user.phoneNumber };
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────
