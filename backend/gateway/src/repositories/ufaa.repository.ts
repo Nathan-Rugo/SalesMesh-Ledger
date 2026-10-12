@@ -45,13 +45,15 @@ export interface UfaaItem {
   msisdn: string;
   /** The oldest escrow's release_due_at. */
   payableFrom: Date;
+  /** sales_agents.ufaa_owner_no: the serial in the report's ID number. */
+  ownerNo: number;
 }
 
 const date = (v: unknown): Date | null => (v ? new Date(v as string) : null);
 const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 const RET = `return_id, period_end::text AS period_end, status, noticed_at, reported_at, remitted_at, remittance_reference, report_path,
              noticed_cents, noticed_items, reported_cents, reported_items, remitted_cents, remitted_items`;
-const ITEM = `i.item_id, i.agent_id, a.user_id, i.escrow_ids, i.amount_cents, i.owner_name, i.msisdn, i.payable_from`;
+const ITEM = `i.item_id, i.agent_id, a.user_id, i.escrow_ids, i.amount_cents, i.owner_name, i.msisdn, i.payable_from, a.ufaa_owner_no`;
 const ITEM_FROM = `ufaa_return_items i JOIN sales_agents a ON a.agent_id = i.agent_id`;
 
 function toReturn(r: QueryResultRow): UfaaReturn {
@@ -83,6 +85,7 @@ function toItem(r: QueryResultRow): UfaaItem {
     ownerName: r.owner_name,
     msisdn: r.msisdn,
     payableFrom: new Date(r.payable_from),
+    ownerNo: Number(r.ufaa_owner_no),
   };
 }
 
@@ -99,10 +102,10 @@ async function event(db: Db, type: SecurityEventType, ret: Pick<UfaaReturn, 'per
 
 /**
  * Dormant commission per agent: claimable escrows (HELD, not security-held, not frozen) whose
- * release_due_at is at or before `periodEnd` (end of day, Africa/Nairobi) minus `days`, and not in a
+ * release_due_at is before the end of `periodEnd` (Africa/Nairobi) minus `years` calendar years, and not in a
  * live item of another return that is not REMITTED (one escrow, one return).
  */
-export async function dormantByAgent(db: Db, periodEnd: string, days: number) {
+export async function dormantByAgent(db: Db, periodEnd: string, years: number) {
   const { rows } = await db.query(
     `SELECT t.agent_id, array_agg(e.escrow_id ORDER BY e.release_due_at, e.escrow_id) AS escrow_ids,
             sum((e.gross_commission * 100)::bigint) AS cents, min(e.release_due_at) AS payable_from,
@@ -110,12 +113,12 @@ export async function dormantByAgent(db: Db, periodEnd: string, days: number) {
        FROM escrow_accounts e JOIN transactions t USING (transaction_id)
        JOIN sales_agents a ON a.agent_id = t.agent_id JOIN users u ON u.user_id = a.user_id
       WHERE ${CLAIMABLE('e')}
-        AND e.release_due_at < (($1::date + 1 - $2::int)::timestamp AT TIME ZONE 'Africa/Nairobi')
+        AND e.release_due_at < ((($1::date + 1)::timestamp - make_interval(years => $2::int)) AT TIME ZONE 'Africa/Nairobi')
         AND NOT EXISTS (SELECT 1 FROM ufaa_return_items oi JOIN ufaa_returns o USING (return_id)
                          WHERE o.status <> 'REMITTED' AND oi.dropped_at IS NULL AND e.escrow_id = ANY(oi.escrow_ids))
       GROUP BY t.agent_id, u.full_name, u.phone_number
       ORDER BY t.agent_id`,
-    [periodEnd, days]
+    [periodEnd, years]
   );
   return rows.map((r) => ({
     agentId: r.agent_id as string,
@@ -135,13 +138,13 @@ export async function dormantByAgent(db: Db, periodEnd: string, days: number) {
 export async function createReturn(
   db: TxDb,
   periodEnd: string,
-  days: number
+  years: number
 ): Promise<{ kind: 'nothing' } | { kind: 'exists' | 'created'; ret: UfaaReturn }> {
   return withTransaction(db, async (tx) => {
     const existing = async () => (await tx.query(`SELECT ${RET} FROM ufaa_returns WHERE period_end = $1`, [periodEnd])).rows[0];
     const found = await existing();
     if (found) return { kind: 'exists', ret: toReturn(found) } as const;
-    const dormant = await dormantByAgent(tx, periodEnd, days);
+    const dormant = await dormantByAgent(tx, periodEnd, years);
     if (!dormant.length) return { kind: 'nothing' } as const;
     const { rows: [ins] } = await tx.query(
       `INSERT INTO ufaa_returns (period_end, noticed_cents, noticed_items) VALUES ($1, $2, $3)
@@ -192,6 +195,16 @@ export async function markNoticed(db: Db, returnId: string, at: Date): Promise<U
     [returnId, at.toISOString()]
   );
   return r ? toReturn(r) : null;
+}
+
+/** The largest owner serial among the return's live items (null: none), checked before the report writes. */
+export async function maxOwnerNo(db: Db, returnId: string): Promise<number | null> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(returnId)) return null;
+  const { rows: [r] } = await db.query(
+    `SELECT max(a.ufaa_owner_no) AS n FROM ufaa_return_items i JOIN sales_agents a USING (agent_id) WHERE i.return_id = $1 AND i.dropped_at IS NULL`,
+    [returnId]
+  );
+  return r?.n === null || r?.n === undefined ? null : Number(r.n);
 }
 
 /** Locks a return (by id) for a step; null when there is none. */

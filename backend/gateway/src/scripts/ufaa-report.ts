@@ -24,6 +24,10 @@ export async function ufaaReport(service: Pick<UfaaService, 'report'>, argv: str
   switch (r.kind) {
     case 'not_found':
       throw new CliError('no UFAA return with this id');
+    case 'no_holder_code':
+      throw new CliError('refused: set UFAA_HOLDER_ID_CODE (1-6 digits, the code UFAA issued on holder registration); nothing written');
+    case 'owner_no_too_large':
+      throw new CliError(`refused: owner serial ${r.ownerNo} does not fit an 8-digit ID number after UFAA_HOLDER_ID_CODE; nothing written`);
     case 'wrong_status':
       throw new CliError(
         r.ret.status === 'DRAFT'
@@ -38,7 +42,8 @@ export async function ufaaReport(service: Pick<UfaaService, 'report'>, argv: str
         `Return ${r.ret.returnId} (${r.ret.periodEnd}) is REPORTED: ${r.ret.reportedItems} owner(s), KES ${cents} ` +
           `(${r.ret.noticedItems - (r.ret.reportedItems ?? 0)} dropped: claimed or no longer dormant).`,
         `Holder report: ${r.ret.reportPath}`,
-        `Upload it to the UFAA portal, transfer KES ${cents} to the Unclaimed Assets Trust Fund, then:`,
+        `Copy the rows into the UFAA portal's Form 2 (Excel) for the Cash asset type and upload it; its total must equal the transfer of ` +
+          `KES ${cents} to the Unclaimed Assets Trust Fund (KES account 1000535261 at CBK). Then:`,
         `  npm run ufaa:remit -- ${r.ret.returnId} --reference <CBK reference>`,
       ];
       if (r.stale) lines.unshift('WARNING: the last notice was sent more than a year ago (the Act allows 60 days to 1 year): re-notice owners.');

@@ -20,7 +20,7 @@ import { ufaaReport } from '../../src/scripts/ufaa-report';
 import { GatewayMetrics } from '../../src/services/metrics.service';
 import { LogNotifier } from '../../src/services/notifier.service';
 import { PayoutService } from '../../src/services/payout.service';
-import { filingDeadline, holderReportCsv, UfaaService } from '../../src/services/ufaa.service';
+import { filingDeadline, holderReportCsv, ownerIdNumber, UfaaService } from '../../src/services/ufaa.service';
 import { listen } from '../support/http';
 import { count, createTestDb, describeDb, INIT_SQL, seedAgent, type TestDb } from './helpers';
 
@@ -34,14 +34,21 @@ const at = (d: Date, days: number) => new Date(d.getTime() + days * DAY);
 describe('UFAA holder report CSV', () => {
   it('quotes commas, quotes and newlines, and neutralises formula cells', () => {
     const csv = holderReportCsv([
-      { itemId: 'i1', agentId: 'a', userId: 'u', escrowIds: ['e'], amountCents: 123456, ownerName: 'Doe, "JJ"', msisdn: '254712345678', payableFrom: new Date('2025-03-01T00:00:00Z') },
-      { itemId: 'i2', agentId: 'a', userId: 'u', escrowIds: ['e'], amountCents: 5, ownerName: '=HYPERLINK("x")', msisdn: '254712345679', payableFrom: new Date('2025-06-30T20:00:00Z') },
-    ]);
+      { itemId: 'i1', agentId: 'a', userId: 'u', escrowIds: ['e'], amountCents: 123456, ownerName: 'Doe, "JJ"', msisdn: '254712345678', payableFrom: new Date('2025-03-01T00:00:00Z'), ownerNo: 1 },
+      { itemId: 'i2', agentId: 'a', userId: 'u', escrowIds: ['e'], amountCents: 5, ownerName: '=HYPERLINK("x")', msisdn: '254712345679', payableFrom: new Date('2025-06-30T20:00:00Z'), ownerNo: 123 },
+    ], '45');
     expect(csv).toBe(
-      'owner_name,phone,amount_kes,asset_type,date_payable,holder_reference\r\n' +
-        '"Doe, ""JJ""",254712345678,1234.56,Unpaid commission,2025-03-01,i1\r\n' +
-        `"'=HYPERLINK(""x"")",254712345679,0.05,Unpaid commission,2025-06-30,i2\r\n`
+      'owner_name,id_number,phone,amount_kes,asset_type,date_payable,holder_reference\r\n' +
+        '"Doe, ""JJ""",45000001,254712345678,1234.56,Unpaid commission,2025-03-01,i1\r\n' +
+        `"'=HYPERLINK(""x"")",45000123,254712345679,0.05,Unpaid commission,2025-06-30,i2\r\n`
     );
+  });
+
+  it('ID number: holder code + owner serial, 8 digits; null when it does not fit', () => {
+    expect(ownerIdNumber('45', 1)).toBe('45000001');
+    expect(ownerIdNumber('123456', 99)).toBe('12345699');
+    expect(ownerIdNumber('123456', 100)).toBeNull();
+    expect(ownerIdNumber('7', 9_999_999)).toBe('79999999');
   });
 });
 
@@ -82,7 +89,8 @@ describeDb('UFAA report-and-remit (real Postgres)', () => {
       },
       now: () => clock,
       reportDir: dir,
-      dormancyDays: 365,
+      holderIdCode: '45',
+      dormancyYears: 1,
     });
   });
   afterEach(async () => {
@@ -199,7 +207,7 @@ describeDb('UFAA report-and-remit (real Postgres)', () => {
 
   it('SMS not configured (log-only notifier) → refused, nothing written', async () => {
     await seed();
-    const logOnly = new UfaaService({ db: db.pool, metrics: new GatewayMetrics(), notifier: new LogNotifier(), now: () => clock, reportDir: dir, dormancyDays: 365 });
+    const logOnly = new UfaaService({ db: db.pool, metrics: new GatewayMetrics(), notifier: new LogNotifier(), now: () => clock, reportDir: dir, holderIdCode: '45', dormancyYears: 1 });
     await expect(ufaaPrepare(logOnly, [PERIOD], 'ops')).rejects.toThrow(/SMS is not configured.*nothing written/);
     expect(await count(db.pool, `SELECT count(*) AS n FROM ufaa_returns`)).toBe(0);
     expect(await count(db.pool, `SELECT count(*) AS n FROM security_events`)).toBe(0);
@@ -249,24 +257,28 @@ describeDb('UFAA report-and-remit (real Postgres)', () => {
     expect((await getPayouts(s.a.userId)).remitted).toEqual([]);
   });
 
-  it('env wiring: UFAA_DORMANCY_DAYS and UFAA_REPORT_DIR are read when not injected', async () => {
+  it('env wiring: UFAA_DORMANCY_YEARS, UFAA_REPORT_DIR and UFAA_HOLDER_ID_CODE are read when not injected', async () => {
     const s = await seed();
+    const aOld = await escrow(s.a.agentId, '5.00', '2024-06-30T23:00:00+03:00'); // more than 2 years before 2026-06-30
     const envDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ufaa-env-'));
-    process.env.UFAA_DORMANCY_DAYS = '400';
+    process.env.UFAA_DORMANCY_YEARS = '2';
     process.env.UFAA_REPORT_DIR = envDir;
+    process.env.UFAA_HOLDER_ID_CODE = '77';
     try {
       const fromEnv = new UfaaService({ db: db.pool, metrics: new GatewayMetrics(), notifier: { send: async (to, message) => void sent.push({ to, message }) }, now: () => clock });
       await ufaaPrepare(fromEnv, [PERIOD], 'ops');
-      // 400 days before 2026-06-30 is 2025-05-26: a2 (payable 2025-06-30) is inside the window, not snapshotted.
-      const { rows } = await db.pool.query(`SELECT agent_id, escrow_ids FROM ufaa_return_items ORDER BY amount_cents DESC`);
-      expect(rows).toEqual([{ agent_id: s.a.agentId, escrow_ids: [s.a1] }, { agent_id: s.b.agentId, escrow_ids: [s.b1] }]);
+      // Two years: only escrows payable by 2024-06-30 (Nairobi). a1, a2 and b1 (dormant under 1 year) are inside the window.
+      const { rows } = await db.pool.query(`SELECT agent_id, escrow_ids FROM ufaa_return_items`);
+      expect(rows).toEqual([{ agent_id: s.a.agentId, escrow_ids: [aOld] }]);
       clock = at(PREPARED_AT, 61);
       await ufaaReport(fromEnv, [(await ret()).return_id], 'ops');
       expect(path.dirname((await ret()).report_path)).toBe(path.resolve(envDir));
       expect(fs.readdirSync(envDir)).toHaveLength(1);
+      expect(fs.readFileSync((await ret()).report_path, 'utf8')).toMatch(/^Test Agent,77\d{6},/m);
     } finally {
-      delete process.env.UFAA_DORMANCY_DAYS;
+      delete process.env.UFAA_DORMANCY_YEARS;
       delete process.env.UFAA_REPORT_DIR;
+      delete process.env.UFAA_HOLDER_ID_CODE;
       fs.rmSync(envDir, { recursive: true, force: true });
     }
   });
@@ -340,16 +352,48 @@ describeDb('UFAA report-and-remit (real Postgres)', () => {
     const r = await ret();
     expect(r).toMatchObject({ status: 'REPORTED', reported_items: 2, reported_cents: '17075' });
     const csv = fs.readFileSync(r.report_path, 'utf8').trim().split('\r\n');
-    expect(csv[0]).toBe('owner_name,phone,amount_kes,asset_type,date_payable,holder_reference');
+    expect(csv[0]).toBe('owner_name,id_number,phone,amount_kes,asset_type,date_payable,holder_reference');
+    const id = async (agentId: string) => {
+      const n = (await db.pool.query(`SELECT ufaa_owner_no FROM sales_agents WHERE agent_id = $1`, [agentId])).rows[0].ufaa_owner_no;
+      return `45${String(n).padStart(6, '0')}`;
+    };
+    const [idA, idB] = [await id(s.a.agentId), await id(s.b.agentId)];
+    expect(idA).toMatch(/^45\d{6}$/);
+    expect(idA).not.toBe(idB);
     expect(csv.slice(1)).toEqual(
       expect.arrayContaining([
-        expect.stringMatching(new RegExp(`^Test Agent,${s.b.phone},20\\.00,Unpaid commission,2024-12-01,[0-9a-f-]{36}$`)),
-        expect.stringMatching(new RegExp(`^Test Agent,${s.a.phone},150\\.75,Unpaid commission,2025-03-01,[0-9a-f-]{36}$`)),
+        expect.stringMatching(new RegExp(`^Test Agent,${idB},${s.b.phone},20\\.00,Unpaid commission,2024-12-01,[0-9a-f-]{36}$`)),
+        expect.stringMatching(new RegExp(`^Test Agent,${idA},${s.a.phone},150\\.75,Unpaid commission,2025-03-01,[0-9a-f-]{36}$`)),
       ])
     );
     expect(csv).toHaveLength(3);
     expect(await events('UFAA_REPORTED')).toHaveLength(2);
     await expect(report(s.id)).rejects.toThrow(/already reported: the return is REPORTED/);
+  });
+
+  it('report without a valid UFAA_HOLDER_ID_CODE, or an owner serial too large → refused, nothing written, return stays NOTICED', async () => {
+    const s = await prepared();
+    clock = at(PREPARED_AT, 61);
+    const svc = (holderIdCode: string) =>
+      new UfaaService({ db: db.pool, metrics: new GatewayMetrics(), notifier: { send: async () => undefined }, now: () => clock, reportDir: dir, holderIdCode, dormancyYears: 1 });
+    for (const code of ['', '1234567', '4a']) {
+      await expect(ufaaReport(svc(code), [s.id], 'ops')).rejects.toThrow(/refused: set UFAA_HOLDER_ID_CODE.*nothing written/);
+    }
+    await db.pool.query(`UPDATE sales_agents SET ufaa_owner_no = 100 WHERE agent_id = $1`, [s.a.agentId]);
+    await expect(ufaaReport(svc('123456'), [s.id], 'ops')).rejects.toThrow(/refused: owner serial 100 does not fit.*nothing written/);
+    expect(await ret()).toMatchObject({ status: 'NOTICED', report_path: null });
+    expect(await count(db.pool, `SELECT count(*) AS n FROM ufaa_return_items WHERE dropped_at IS NOT NULL`)).toBe(0);
+    expect(await count(db.pool, `SELECT count(*) AS n FROM escrow_accounts WHERE ufaa_return_id IS NOT NULL`)).toBe(0);
+    expect(fs.readdirSync(dir)).toEqual([]);
+  });
+
+  it('leap year: dormancy is calendar years — for period 2028-06-30, payable 2027-06-30 23:00 is dormant, 2027-07-01 00:30 is not', async () => {
+    const a = await agent();
+    const lastIn = await escrow(a.agentId, '10.00', '2027-06-30T23:00:00+03:00');
+    await escrow(a.agentId, '20.00', '2027-07-01T00:30:00+03:00'); // 365-day arithmetic would include it (2028 is a leap year)
+    clock = new Date('2028-07-15T10:00:00+03:00');
+    await prepare('2028-06-30');
+    expect((await db.pool.query(`SELECT escrow_ids, amount_cents FROM ufaa_return_items`)).rows).toEqual([{ escrow_ids: [lastIn], amount_cents: '1000' }]);
   });
 
   it('late: report after 1 November → CSV still written, with a loud LATE warning', async () => {

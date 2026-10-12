@@ -1,7 +1,7 @@
 /**
  * @file ufaa.service.ts
  * @description The annual Unclaimed Financial Assets Act return for dormant commission (spec gh-11,
- * part 3b). Unpaid wages unclaimed for UFAA_DORMANCY_DAYS (365) after becoming payable are presumed
+ * part 3b). Unpaid wages unclaimed for more than UFAA_DORMANCY_YEARS (1) calendar year(s) after becoming payable are presumed
  * abandoned; the holder notices each owner 60 days to 1 year before filing, files by 1 November for
  * the 12 months to 30 June, and remits to the Unclaimed Assets Trust Fund. Three admin steps:
  *
@@ -17,7 +17,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import pool from '../config/db';
-import { ufaaDormancyDays } from '../domain/payout';
+import { ufaaDormancyYears } from '../domain/payout';
 import { maskMsisdn } from '../domain/payout_destination';
 import type { TxDb } from '../repositories/db.types';
 import {
@@ -26,6 +26,7 @@ import {
   liveItems,
   markNoticed,
   markReported,
+  maxOwnerNo,
   pendingNotices,
   recordNotice,
   remit,
@@ -52,7 +53,9 @@ export interface UfaaDeps {
   now?: () => Date;
   /** Where report CSVs are written (UFAA_REPORT_DIR, default ufaa-returns). */
   reportDir?: string;
-  dormancyDays?: number;
+  /** UFAA_HOLDER_ID_CODE: the 1-6 digit code UFAA issues on holder registration. */
+  holderIdCode?: string;
+  dormancyYears?: number;
 }
 
 export type PrepareResult =
@@ -73,6 +76,10 @@ export type PrepareResult =
 
 export type ReportResult =
   | { kind: 'not_found' }
+  /** UFAA_HOLDER_ID_CODE missing or not 1-6 digits; nothing written. */
+  | { kind: 'no_holder_code' }
+  /** An owner serial does not fit the 8-digit ID number after the holder code; nothing written. */
+  | { kind: 'owner_no_too_large'; ownerNo: number }
   | { kind: 'wrong_status'; ret: UfaaReturn }
   | { kind: 'too_early'; ret: UfaaReturn; earliest: Date }
   /** `stale`: the last notice is more than a year old (outside the Act's 60 days to 1 year): re-notice owners. */
@@ -91,11 +98,28 @@ export function csvCell(v: string): string {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export const CSV_HEADER = ['owner_name', 'phone', 'amount_kes', 'asset_type', 'date_payable', 'holder_reference'];
+export const CSV_HEADER = ['owner_name', 'id_number', 'phone', 'amount_kes', 'asset_type', 'date_payable', 'holder_reference'];
+
+/**
+ * The owner's ID number. No national ID is held, so UFAA's fallback: the holder's ID code followed by
+ * a serial, 8 digits in all (holder 45, owner 1 → 45000001). null when it does not fit.
+ */
+export function ownerIdNumber(holderIdCode: string, ownerNo: number): string | null {
+  const width = 8 - holderIdCode.length;
+  return Number.isInteger(ownerNo) && ownerNo > 0 && String(ownerNo).length <= width ? holderIdCode + String(ownerNo).padStart(width, '0') : null;
+}
 
 /** The holder report: one row per agent still holding dormant commission. */
-export function holderReportCsv(items: readonly UfaaItem[]): string {
-  const rows = items.map((i) => [i.ownerName, i.msisdn, kes(i.amountCents), 'Unpaid commission', nairobiDate(i.payableFrom), i.itemId]);
+export function holderReportCsv(items: readonly UfaaItem[], holderIdCode: string): string {
+  const rows = items.map((i) => [
+    i.ownerName,
+    ownerIdNumber(holderIdCode, i.ownerNo) ?? '',
+    i.msisdn,
+    kes(i.amountCents),
+    'Unpaid commission',
+    nairobiDate(i.payableFrom),
+    i.itemId,
+  ]);
   return [CSV_HEADER, ...rows].map((r) => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }
 
@@ -108,7 +132,8 @@ export class UfaaService {
   private readonly metrics: GatewayMetrics;
   private readonly now: () => Date;
   private readonly reportDir: string;
-  private readonly days?: number;
+  private readonly holderIdCode: string;
+  private readonly years?: number;
 
   constructor(deps: UfaaDeps = {}) {
     this.db = deps.db ?? pool;
@@ -116,7 +141,8 @@ export class UfaaService {
     this.metrics = deps.metrics ?? defaultMetrics;
     this.now = deps.now ?? (() => new Date());
     this.reportDir = deps.reportDir ?? (process.env.UFAA_REPORT_DIR?.trim() || 'ufaa-returns');
-    this.days = deps.dormancyDays;
+    this.holderIdCode = (deps.holderIdCode ?? process.env.UFAA_HOLDER_ID_CODE ?? '').trim();
+    this.years = deps.dormancyYears;
   }
 
   /**
@@ -129,7 +155,7 @@ export class UfaaService {
     if (!payoutsEnabled()) return { kind: 'payouts_disabled' };
     if (!/^\d{4}-06-30$/.test(periodEnd)) return { kind: 'invalid_period', reason: 'the period must end on a 30 June (YYYY-06-30)' };
     if (periodEnd >= nairobiDate(now)) return { kind: 'invalid_period', reason: 'the period has not ended yet' };
-    const created = await createReturn(this.db, periodEnd, this.days ?? ufaaDormancyDays());
+    const created = await createReturn(this.db, periodEnd, this.years ?? ufaaDormancyYears());
     if (created.kind === 'nothing') return created;
     if (created.ret.status !== 'DRAFT') return { kind: 'already', ret: created.ret };
 
@@ -176,6 +202,10 @@ export class UfaaService {
   async report(returnId: string, operator: string): Promise<ReportResult> {
     const now = this.now();
     const earliest = (r: UfaaReturn) => new Date(r.noticedAt!.getTime() + NOTICE_GAP_DAYS * DAY_MS);
+    // The ID number column is mandatory: check it can be built before anything is written.
+    if (!/^\d{1,6}$/.test(this.holderIdCode)) return { kind: 'no_holder_code' };
+    const maxNo = await maxOwnerNo(this.db, returnId);
+    if (maxNo !== null && ownerIdNumber(this.holderIdCode, maxNo) === null) return { kind: 'owner_no_too_large', ownerNo: maxNo };
     const r = await markReported(
       this.db,
       returnId,
@@ -184,7 +214,7 @@ export class UfaaService {
       async (ret, items) => {
         await fs.mkdir(this.reportDir, { recursive: true });
         const file = path.resolve(this.reportDir, `ufaa-return-${ret.periodEnd}-${ret.returnId}.csv`);
-        await fs.writeFile(file, holderReportCsv(items), { encoding: 'utf8', mode: 0o600 }); // names and phones
+        await fs.writeFile(file, holderReportCsv(items, this.holderIdCode), { encoding: 'utf8', mode: 0o600 }); // names and phones
         return file;
       },
       `reported to UFAA (holder report) by ${operator}`
