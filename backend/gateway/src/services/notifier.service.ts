@@ -1,8 +1,9 @@
 /**
  * @file notifier.service.ts
- * @description Agent alerts (spec gh-11): WhatsApp through the Twilio API (fetch + Basic auth, no
- * SDK, 5 s timeout) when TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_WHATSAPP_FROM are all set;
- * otherwise a log-only notifier. `notifySafely` never throws: a failed send is logged and counted,
+ * @description Agent alerts (spec gh-11): SMS through Africa's Talking (fetch, no SDK, 5 s timeout)
+ * when AFRICASTALKING_USERNAME / AFRICASTALKING_API_KEY are set (username "sandbox" uses the sandbox
+ * API, whose messages appear in the web simulator); otherwise a log-only notifier. SMS reaches any
+ * Kenyan line (feature phones too) with no recipient opt-in. `notifySafely` never throws: a failed send is logged and counted,
  * and never blocks or rolls back the flow that raised it.
  */
 
@@ -14,58 +15,66 @@ export interface Notifier {
   send(msisdn: string, message: string): Promise<void>;
 }
 
-type FetchLike = (url: string, init?: RequestInit) => Promise<{ ok: boolean; status: number }>;
+type FetchLike = (url: string, init?: RequestInit) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
-export interface TwilioConfig {
-  accountSid: string;
-  authToken: string;
-  /** "whatsapp:+14155238886" */
-  from: string;
+export interface AfricasTalkingConfig {
+  username: string;
+  apiKey: string;
+  /** Registered alphanumeric sender ID; omitted → the shared default (always omitted in the sandbox). */
+  senderId?: string;
   timeoutMs: number;
 }
 
-export class TwilioWhatsAppNotifier implements Notifier {
+/** Recipient statusCode 100 Processed, 101 Sent, 102 Queued; 4xx/5xx are failures inside an HTTP 201. */
+const AT_ACCEPTED = new Set([100, 101, 102]);
+
+export class AfricasTalkingSmsNotifier implements Notifier {
   constructor(
-    private readonly cfg: TwilioConfig,
+    private readonly cfg: AfricasTalkingConfig,
     private readonly fetchImpl: FetchLike = (url, init) => fetch(url, init)
   ) {}
 
   async send(msisdn: string, message: string): Promise<void> {
+    const host = this.cfg.username === 'sandbox' ? 'api.sandbox.africastalking.com' : 'api.africastalking.com';
+    const body = new URLSearchParams({ username: this.cfg.username, to: `+${msisdn}`, message });
+    if (this.cfg.senderId) body.set('from', this.cfg.senderId);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.cfg.timeoutMs);
     try {
-      const res = await this.fetchImpl(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(this.cfg.accountSid)}/Messages.json`, {
+      const res = await this.fetchImpl(`https://${host}/version1/messaging`, {
         method: 'POST',
-        headers: {
-          Authorization: `Basic ${Buffer.from(`${this.cfg.accountSid}:${this.cfg.authToken}`).toString('base64')}`,
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({ From: this.cfg.from, To: `whatsapp:+${msisdn}`, Body: message }).toString(),
+        headers: { apiKey: this.cfg.apiKey, Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
         signal: controller.signal,
       });
-      if (!res.ok) throw new Error(`Twilio HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`Africa's Talking HTTP ${res.status}`);
+      const recipients = ((await res.json()) as { SMSMessageData?: { Recipients?: { statusCode?: number; status?: string }[] } })
+        ?.SMSMessageData?.Recipients;
+      const first = recipients?.[0];
+      if (!first || !AT_ACCEPTED.has(Number(first.statusCode))) {
+        throw new Error(`Africa's Talking rejected: ${first ? `${first.statusCode} ${first.status}` : 'no recipient'}`);
+      }
     } catch (error) {
-      throw new Error(controller.signal.aborted ? 'Twilio timeout' : (error as Error).message);
+      throw new Error(controller.signal.aborted ? "Africa's Talking timeout" : (error as Error).message);
     } finally {
       clearTimeout(timer);
     }
   }
 }
 
-/** Fallback when Twilio is not configured: the alert is only logged (masked phone, no names). */
+/** Fallback when Africa's Talking is not configured: the alert is only logged (masked phone, no names). */
 export class LogNotifier implements Notifier {
   async send(msisdn: string): Promise<void> {
     console.info(`[Notify] (log-only) payout-destination alert for ${maskMsisdn(msisdn)}`);
   }
 }
 
-/** Twilio when all three TWILIO_* are set, else the log-only notifier. */
+/** Africa's Talking when the username and API key are set, else the log-only notifier. */
 export function notifierFromEnv(env: NodeJS.ProcessEnv = process.env): Notifier {
-  const accountSid = env.TWILIO_ACCOUNT_SID?.trim();
-  const authToken = env.TWILIO_AUTH_TOKEN?.trim();
-  const from = env.TWILIO_WHATSAPP_FROM?.trim();
-  if (!accountSid || !authToken || !from) return new LogNotifier();
-  return new TwilioWhatsAppNotifier({ accountSid, authToken, from: from.startsWith('whatsapp:') ? from : `whatsapp:${from}`, timeoutMs: 5_000 });
+  const username = env.AFRICASTALKING_USERNAME?.trim();
+  const apiKey = env.AFRICASTALKING_API_KEY?.trim();
+  if (!username || !apiKey) return new LogNotifier();
+  return new AfricasTalkingSmsNotifier({ username, apiKey, senderId: env.AFRICASTALKING_SENDER_ID?.trim() || undefined, timeoutMs: 5_000 });
 }
 
 /** Sends one alert; never throws (logged and counted on failure). */
