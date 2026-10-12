@@ -46,6 +46,7 @@ import {
   type PayoutRow,
   type ResultOutcome,
 } from '../repositories/payout.repository';
+import { remittedForAgent } from '../repositories/ufaa.repository';
 import { metrics as defaultMetrics, type GatewayMetrics } from './metrics.service';
 import { notifierFromEnv, notifySafely, type Notifier } from './notifier.service';
 import { isNotSent, payoutsEnabled } from './payout_destination.service';
@@ -119,15 +120,26 @@ export class PayoutService {
 
   /** GET: balance, destination, the disclosure to accept, and history. */
   async claimable(userId: string): Promise<
-    AgentFailure | { kind: 'ok'; balance: Balance; destination: string | null; destinationChanging: boolean; disclosure: { version: string; text: string }; payouts: PayoutRow[] }
+    | AgentFailure
+    | {
+        kind: 'ok';
+        balance: Balance;
+        destination: string | null;
+        destinationChanging: boolean;
+        disclosure: { version: string; text: string };
+        payouts: PayoutRow[];
+        /** Dormant commission transferred (reference) or being transferred (null) to UFAA (part 3b): not in the balance. */
+        remitted: Array<{ cents: number; periodEnd: string; reference: string | null; holderReference: string }>;
+      }
   > {
     const agent = await findAgentForUser(this.db, userId);
     if (!agent) return { kind: 'not_provisioned' };
     if (agent.userDisabled) return { kind: 'disabled' };
-    const [escrows, ctx, payouts] = await Promise.all([
+    const [escrows, ctx, payouts, remitted] = await Promise.all([
       claimableEscrows(this.db, agent.agentId),
       payoutContext(this.db, agent.agentId),
       listPayouts(this.db, agent.agentId),
+      remittedForAgent(this.db, agent.agentId),
     ]);
     const cents = escrows.reduce((s, e) => s + e.cents, 0) + ctx.carryCents;
     return {
@@ -137,6 +149,7 @@ export class PayoutService {
       destinationChanging: ctx.changing,
       disclosure: this.disclosure(),
       payouts,
+      remitted,
     };
   }
 

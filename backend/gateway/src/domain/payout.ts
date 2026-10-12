@@ -71,6 +71,11 @@ export function payoutConfig(env: NodeJS.ProcessEnv = process.env): PayoutConfig
   return cfg;
 }
 
+/** UFAA_DORMANCY_YEARS (default 1, the Act's s.16 unpaid wages rule; calendar years): a matured escrow unclaimed this long is dormant. */
+export function ufaaDormancyYears(env: NodeJS.ProcessEnv = process.env): number {
+  return posInt(env, 'UFAA_DORMANCY_YEARS', 1);
+}
+
 const sha256 = (s: string): string => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 
 export interface Consent {

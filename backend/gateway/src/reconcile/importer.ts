@@ -426,14 +426,14 @@ async function processReversal(db: Db, row: StatementRow, ctx: Ctx): Promise<voi
         runId: ctx.runId!,
         escrowId: r.escrowId,
         amount: centsToDecimal(row.amountCents),
-        detail: `escrow already RELEASED or CLAIMED (payout in flight) when ${row.receipt} reversed ${linked} (statement line ${row.line})`,
+        detail: `escrow already RELEASED, CLAIMED (payout in flight) or REMITTED (with UFAA) when ${row.receipt} reversed ${linked} (statement line ${row.line})`,
       });
     }
   }
   ctx.counts.clawbacksDue += released.length;
   ctx.actions.push(
     `${where} of ${linked} (${partial ? 'partial' : 'full'}) → PAYMENT_REVERSED` +
-      (k ? (released.length ? ', escrow already RELEASED or CLAIMED (payout in flight) → CLAWBACK_DUE' : ', escrow security-held') : ' (receipt unknown: event only)')
+      (k ? (released.length ? ', escrow already RELEASED, CLAIMED (payout in flight) or REMITTED (with UFAA) → CLAWBACK_DUE' : ', escrow security-held') : ' (receipt unknown: event only)')
   );
 }
 
@@ -481,7 +481,7 @@ async function twoWay(db: TxDb, missing: string[], ctx: Ctx): Promise<void> {
             runId: ctx.runId!,
             escrowId: r.escrowId,
             amount: r.amount,
-            detail: 'escrow already RELEASED or CLAIMED (payout in flight) for a callback receipt missing from the statement',
+            detail: 'escrow already RELEASED, CLAIMED (payout in flight) or REMITTED (with UFAA) for a callback receipt missing from the statement',
           });
         }
         return held.released;

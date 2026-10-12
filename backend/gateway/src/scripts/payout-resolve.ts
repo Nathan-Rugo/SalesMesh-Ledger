@@ -31,7 +31,7 @@ export function parsePayoutResolveArgs(argv: string[]): { id: string; o: { paid:
 }
 
 /** The OS account running the CLI, recorded in the event as the operator. */
-function operator(): string {
+export function operator(): string {
   try {
     return os.userInfo().username || 'unknown';
   } catch {

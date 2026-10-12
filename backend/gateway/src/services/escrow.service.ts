@@ -29,7 +29,7 @@ export { QUARANTINE_HOLD_HOURS };
 
 export type QuarantineReason = 'security_hold' | 'fail_safe' | 'model_decision' | 'trust_below_threshold' | 'trust_input_invalid';
 
-export type EscrowStatus = 'HELD' | 'CLAIMED' | 'QUARANTINED' | 'RELEASED';
+export type EscrowStatus = 'HELD' | 'CLAIMED' | 'QUARANTINED' | 'RELEASED' | 'REMITTED';
 
 export interface EscrowOutcome {
   status: 'HELD' | 'QUARANTINED';

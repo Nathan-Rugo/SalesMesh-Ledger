@@ -107,7 +107,9 @@ async function event(db: Db, userId: string, p: PayoutRow, what: string): Promis
   await insertSubjectSecurityEvent(db, { type: 'PAYOUT_STATUS_CHANGED', userId, detail: payoutDetail(p, what) });
 }
 
-const CLAIMABLE = (e: string) => `${e}.escrow_status = 'HELD' AND NOT ${e}.security_hold AND ${e}.gross_commission > 0`;
+/** Claimable (part 2): HELD, not security-held, not frozen in a reported UFAA return (part 3b). Claims, reminders and UFAA dormancy all use it. */
+export const CLAIMABLE = (e: string) =>
+  `${e}.escrow_status = 'HELD' AND NOT ${e}.security_hold AND ${e}.gross_commission > 0 AND ${e}.ufaa_return_id IS NULL`;
 
 /** Matured HELD escrows of the agent, not security-held, oldest first, in cents. */
 export async function claimableEscrows(db: Db, agentId: string, lock = false): Promise<Array<{ escrowId: string; cents: number }>> {
@@ -464,7 +466,7 @@ export async function dueReminders(db: Db, q: { stages: readonly number[]; minAm
           -- re-checked on the locked row, so concurrent sweeps stay exclusive.
           AND s.stage > GREATEST(e.unclaimed_reminder_stage, (
                 SELECT max(m.unclaimed_reminder_stage) FROM escrow_accounts m JOIN transactions mt USING (transaction_id)
-                 WHERE mt.agent_id = t.agent_id AND m.escrow_status IN ('HELD', 'QUARANTINED')))
+                 WHERE mt.agent_id = t.agent_id AND m.escrow_status IN ('HELD', 'QUARANTINED') AND m.ufaa_return_id IS NULL))
           AND NOT EXISTS (SELECT 1 FROM escrow_accounts o JOIN transactions ot USING (transaction_id)
                            WHERE ot.agent_id = t.agent_id AND ${CLAIMABLE('o')} AND (o.release_due_at, o.escrow_id) < (e.release_due_at, e.escrow_id))
           AND u.disabled_at IS NULL
