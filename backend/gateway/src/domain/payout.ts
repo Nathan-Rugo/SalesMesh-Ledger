@@ -30,6 +30,10 @@ export interface PayoutConfig {
   /** Transaction Status attempts before the payout becomes UNRESOLVED. */
   statusMaxAttempts: number;
   disclosureVersion: string;
+  /** Unclaimed reminder stages 1..3: days since the oldest claimable escrow matured (strictly increasing). */
+  reminderDays: [number, number, number];
+  /** Reminders are sent only from the first to before the second hour, Africa/Nairobi. */
+  reminderHours: [number, number];
 }
 
 export class PayoutConfigError extends Error {}
@@ -41,6 +45,16 @@ function posInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number 
   return Number(v);
 }
 
+/** A comma list of exactly `n` strictly increasing whole numbers within [min, max]. */
+function intList(env: NodeJS.ProcessEnv, name: string, fallback: number[], min: number, max: number): number[] {
+  const v = env[name]?.trim() ?? '';
+  if (!v) return fallback;
+  const xs = v.split(',').map((x) => x.trim());
+  const ok = xs.length === fallback.length && xs.every((x, i) => /^\d{1,4}$/.test(x) && +x >= min && +x <= max && (i === 0 || +x > +xs[i - 1]));
+  if (!ok) throw new PayoutConfigError(`${name} must be ${fallback.length} strictly increasing whole numbers from ${min} to ${max}, comma-separated`);
+  return xs.map(Number);
+}
+
 /** PAYOUT_* settings with their defaults; throws PayoutConfigError on an invalid value. */
 export function payoutConfig(env: NodeJS.ProcessEnv = process.env): PayoutConfig {
   const cfg = {
@@ -49,6 +63,8 @@ export function payoutConfig(env: NodeJS.ProcessEnv = process.env): PayoutConfig
     statusAfterMs: posInt(env, 'PAYOUT_STATUS_AFTER_MS', 600_000),
     statusMaxAttempts: posInt(env, 'PAYOUT_STATUS_MAX_ATTEMPTS', 6),
     disclosureVersion: env.PAYOUT_DISCLOSURE_VERSION?.trim() || '1',
+    reminderDays: intList(env, 'PAYOUT_REMINDER_DAYS', [7, 30, 90], 1, 3650) as PayoutConfig['reminderDays'],
+    reminderHours: intList(env, 'PAYOUT_REMINDER_HOURS', [8, 20], 0, 24) as PayoutConfig['reminderHours'],
   };
   if (cfg.minAmount > cfg.maxAmount) throw new PayoutConfigError('PAYOUT_MIN_AMOUNT must not exceed PAYOUT_MAX_AMOUNT');
   if (!DISCLOSURES[cfg.disclosureVersion]) throw new PayoutConfigError(`PAYOUT_DISCLOSURE_VERSION ${cfg.disclosureVersion} has no disclosure text`);

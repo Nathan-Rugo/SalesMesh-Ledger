@@ -98,7 +98,7 @@ export interface SettlementWorkerDeps {
   /** Payout-destination promotion / expiry sweep (spec gh-11); runs only while PAYOUTS_ENABLED=true. */
   payouts?: Pick<PayoutDestinationService, 'sweep'>;
   /** Payout Transaction Status recovery (spec gh-11, part 2); runs only while PAYOUTS_ENABLED=true. */
-  payoutClaims?: Pick<PayoutService, 'sweep'>;
+  payoutClaims?: Pick<PayoutService, 'sweep' | 'remindUnclaimed'>;
 }
 
 const isUniqueViolation = (e: unknown, constraint?: string): boolean =>
@@ -111,7 +111,7 @@ export class SettlementWorker {
   private readonly spool: Pick<SpoolService, 'peek' | 'remove'> | null;
   readonly config: SettlementWorkerConfig;
   private readonly payouts: Pick<PayoutDestinationService, 'sweep'>;
-  private readonly payoutClaims: Pick<PayoutService, 'sweep'>;
+  private readonly payoutClaims: Pick<PayoutService, 'sweep' | 'remindUnclaimed'>;
 
   private running = false;
   private loopPromise: Promise<void> | null = null;
@@ -208,6 +208,7 @@ export class SettlementWorker {
     if (payoutsEnabled()) {
       await this.payouts.sweep().catch((e) => console.error('[SettlementWorker] payout-destination sweep failed:', (e as Error).message));
       await this.payoutClaims.sweep().catch((e) => console.error('[SettlementWorker] payout status sweep failed:', (e as Error).message));
+      await this.payoutClaims.remindUnclaimed().catch((e) => console.error('[SettlementWorker] unclaimed reminder sweep failed:', (e as Error).message));
     }
   }
 

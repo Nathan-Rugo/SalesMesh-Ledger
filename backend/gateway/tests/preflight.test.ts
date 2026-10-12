@@ -45,7 +45,7 @@ describe('preflight (startup refusal gates)', () => {
   });
 
   it('a database at migration 001 only (or unreachable) → fatal', async () => {
-    expect((await preflight(base, only001)).fatal).toEqual([expect.stringMatching(/not migrated.*006_payout_claims/)]);
+    expect((await preflight(base, only001)).fatal).toEqual([expect.stringMatching(/not migrated.*007_unclaimed_reminders/)]);
     const down: any = { query: jest.fn(async () => Promise.reject(new Error('connect ECONNREFUSED'))) };
     expect((await preflight(base, down)).fatal).toEqual([expect.stringMatching(/ECONNREFUSED/)]);
   });

@@ -615,7 +615,7 @@ describe('B2C callback routes', () => {
 describe('worker sweep hook', () => {
   it('the settlement worker housekeeping runs the payout sweep only while PAYOUTS_ENABLED=true', async () => {
     const sweep = jest.fn(async () => ({ promoted: 0, expired: 0 }));
-    const w = new SettlementWorker({ pool: fakeDb, spool: null, payouts: { sweep }, payoutClaims: { sweep: jest.fn(async () => ({ queried: 0, unresolved: 0 })) } });
+    const w = new SettlementWorker({ pool: fakeDb, spool: null, payouts: { sweep }, payoutClaims: { sweep: jest.fn(async () => ({ queried: 0, unresolved: 0 })), remindUnclaimed: jest.fn(async () => 0) } });
     process.env.PAYOUTS_ENABLED = 'false';
     await w.housekeeping(true);
     expect(sweep).not.toHaveBeenCalled();

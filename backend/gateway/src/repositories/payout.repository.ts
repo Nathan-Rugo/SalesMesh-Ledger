@@ -107,13 +107,14 @@ async function event(db: Db, userId: string, p: PayoutRow, what: string): Promis
   await insertSubjectSecurityEvent(db, { type: 'PAYOUT_STATUS_CHANGED', userId, detail: payoutDetail(p, what) });
 }
 
+const CLAIMABLE = (e: string) => `${e}.escrow_status = 'HELD' AND NOT ${e}.security_hold AND ${e}.gross_commission > 0`;
+
 /** Matured HELD escrows of the agent, not security-held, oldest first, in cents. */
 export async function claimableEscrows(db: Db, agentId: string, lock = false): Promise<Array<{ escrowId: string; cents: number }>> {
   const { rows } = await db.query(
     `SELECT e.escrow_id, (e.gross_commission * 100)::bigint AS cents
        FROM escrow_accounts e JOIN transactions t USING (transaction_id)
-      WHERE t.agent_id = $1 AND e.escrow_status = 'HELD' AND e.release_due_at <= NOW() AND NOT e.security_hold
-        AND e.gross_commission > 0
+      WHERE t.agent_id = $1 AND ${CLAIMABLE('e')} AND e.release_due_at <= NOW()
       ORDER BY e.release_due_at, e.escrow_id${lock ? ' FOR UPDATE OF e' : ''}`,
     [agentId]
   );
@@ -419,6 +420,64 @@ export async function resolvePayout(
       : await finish(tx, cur.payout, cur.userId, { status: 'FAILED', reason: 'admin_failed', resultCode: null }, `failed (resolved by admin ${operator}); escrows claimable again`);
     return { kind: 'resolved', payout, userId: cur.userId } as const;
   });
+}
+
+export interface DueReminder {
+  agentId: string;
+  /** The login phone (users.phone_number). */
+  phone: string;
+  /** Claimable gross plus the carry, in cents. */
+  cents: number;
+  /** 1..3: the stage just recorded (the highest reached; lower missed ones are never sent). */
+  stage: number;
+  hasActiveDestination: boolean;
+}
+
+
+/**
+ * Unclaimed reminders (spec gh-11, part 3a), claimed in ONE statement: per agent, the oldest
+ * claimable escrow (claimableEscrows order) keys the cycle; the highest stage whose day threshold
+ * its release_due_at has passed, above every stage stored on the agent's HELD / QUARANTINED escrows,
+ * is written onto it (FOR UPDATE SKIP
+ * LOCKED, so two sweeps never both get it). Skips disabled users, agents with an open payout, and
+ * floor(balance) below `minAmount`. A claim moves that escrow out of HELD, so the next cycle keys a
+ * new escrow at stage 0; a FAILED payout returns it with its stage, so nothing repeats.
+ */
+export async function dueReminders(db: Db, q: { stages: readonly number[]; minAmount: number; limit: number }): Promise<DueReminder[]> {
+  const { rows } = await db.query(
+    `WITH due AS (
+       SELECT e.escrow_id, t.agent_id, u.phone_number, s.stage, b.cents,
+              EXISTS (SELECT 1 FROM payout_destinations d WHERE d.agent_id = t.agent_id AND d.status = 'ACTIVE') AS has_dest
+         FROM escrow_accounts e
+         JOIN transactions t USING (transaction_id)
+         JOIN sales_agents a ON a.agent_id = t.agent_id
+         JOIN users u ON u.user_id = a.user_id
+         CROSS JOIN LATERAL (SELECT max(d.i)::int AS stage FROM unnest($1::int[]) WITH ORDINALITY d(days, i)
+                              WHERE e.release_due_at <= NOW() - make_interval(days => d.days)) s
+         CROSS JOIN LATERAL (SELECT (sum((c.gross_commission * 100)::bigint) + a.payout_carry_cents)::bigint AS cents
+                               FROM escrow_accounts c JOIN transactions ct USING (transaction_id)
+                              WHERE ct.agent_id = t.agent_id AND ${CLAIMABLE('c')} AND c.release_due_at <= NOW()) b
+        WHERE ${CLAIMABLE('e')}
+          AND e.release_due_at <= NOW() - make_interval(days => ($1::int[])[1])
+          -- Against every stage still on the agent's unclaimed escrows: a key escrow leaving the claimable
+          -- set (security hold, QUARANTINED) must not let the next one resend a stage. e's own stage is
+          -- re-checked on the locked row, so concurrent sweeps stay exclusive.
+          AND s.stage > GREATEST(e.unclaimed_reminder_stage, (
+                SELECT max(m.unclaimed_reminder_stage) FROM escrow_accounts m JOIN transactions mt USING (transaction_id)
+                 WHERE mt.agent_id = t.agent_id AND m.escrow_status IN ('HELD', 'QUARANTINED')))
+          AND NOT EXISTS (SELECT 1 FROM escrow_accounts o JOIN transactions ot USING (transaction_id)
+                           WHERE ot.agent_id = t.agent_id AND ${CLAIMABLE('o')} AND (o.release_due_at, o.escrow_id) < (e.release_due_at, e.escrow_id))
+          AND u.disabled_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM payouts p WHERE p.agent_id = t.agent_id AND p.status IN ${OPEN})
+          AND b.cents / 100 >= $2
+        ORDER BY e.release_due_at
+        LIMIT $3
+        FOR UPDATE OF e SKIP LOCKED)
+     UPDATE escrow_accounts x SET unclaimed_reminder_stage = due.stage FROM due WHERE x.escrow_id = due.escrow_id
+     RETURNING due.agent_id, due.phone_number, due.cents, due.stage, due.has_dest`,
+    [q.stages, q.minAmount, q.limit]
+  );
+  return rows.map((r) => ({ agentId: r.agent_id, phone: r.phone_number, cents: Number(r.cents), stage: Number(r.stage), hasActiveDestination: r.has_dest }));
 }
 
 /** The agent's most recent payouts, newest first. */

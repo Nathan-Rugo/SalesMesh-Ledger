@@ -273,7 +273,7 @@ process.on('uncaughtException', (err) => {
 });
 
 // ── Start Listener ────────────────────────────────────────────────────
-export const REQUIRED_MIGRATION = '006_payout_claims';
+export const REQUIRED_MIGRATION = '007_unclaimed_reminders';
 
 /**
  * Startup gates, without side effects: `fatal` problems refuse the start, `warnings` are logged.

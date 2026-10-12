@@ -425,8 +425,13 @@ CREATE TABLE IF NOT EXISTS escrow_accounts (
     quarantine_reason VARCHAR(40)                    -- why a QUARANTINED escrow is quarantined (NULL while HELD)
         CONSTRAINT escrow_accounts_quarantine_reason_check CHECK (quarantine_reason IN (
         'security_hold', 'fail_safe', 'model_decision', 'trust_below_threshold', 'trust_input_invalid')),
+    -- Unclaimed reminders (spec gh-11 part 3a): highest stage sent for the cycle this oldest escrow keys.
+    unclaimed_reminder_stage SMALLINT NOT NULL DEFAULT 0
+        CONSTRAINT escrow_accounts_unclaimed_reminder_stage CHECK (unclaimed_reminder_stage BETWEEN 0 AND 3),
     CONSTRAINT escrow_accounts_claimed_payout CHECK (escrow_status <> 'CLAIMED' OR payout_id IS NOT NULL)
 );
+CREATE INDEX IF NOT EXISTS escrow_accounts_claimable_idx
+    ON escrow_accounts (release_due_at) WHERE escrow_status = 'HELD' AND NOT security_hold;
 CREATE INDEX IF NOT EXISTS escrow_accounts_payout_idx ON escrow_accounts (payout_id) WHERE payout_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS escrow_accounts_rescore_idx
     ON escrow_accounts (next_rescore_at) WHERE escrow_status = 'QUARANTINED' AND NOT security_hold;
@@ -482,5 +487,6 @@ CREATE TABLE IF NOT EXISTS tax_deductions (
 
 -- A fresh install already has every migration's shape.
 INSERT INTO schema_migrations (version) VALUES ('001_settlement_pipeline'), ('002_auth_stk_initiation'), ('003_reconciliation'),
-                                               ('004_trust_scores'), ('005_payout_destinations'), ('006_payout_claims')
+                                               ('004_trust_scores'), ('005_payout_destinations'), ('006_payout_claims'),
+                                               ('007_unclaimed_reminders')
     ON CONFLICT (version) DO NOTHING;
