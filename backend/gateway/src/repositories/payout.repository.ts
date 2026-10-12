@@ -384,7 +384,7 @@ export async function releaseStatusLease(db: Db, lease: StatusLease, delayMs: nu
 export async function exhaustStatusChecks(db: TxDb, q: { maxAttempts: number; leaseMs: number }): Promise<PayoutChange[]> {
   return withTransaction(db, async (tx) => {
     const { rows } = await tx.query(
-      `UPDATE payouts c SET status = 'UNRESOLVED', status_claimed_at = NULL, status_claim_token = NULL, updated_at = NOW()
+      `UPDATE payouts c SET status = 'UNRESOLVED', status_claimed_at = NULL, status_claim_token = NULL, updated_at = NOW(), unresolved_at = NOW()
          FROM sales_agents a
         WHERE a.agent_id = c.agent_id AND c.payout_id IN (
               SELECT p.payout_id FROM payouts p

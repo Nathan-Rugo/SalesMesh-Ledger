@@ -43,6 +43,16 @@ Every change is audited in `agent_trust_events`, which is idempotent through UNI
 - **Find stuck work:** `/health/details` reports two things under `trust`. `frozenAgents` counts agents whose rating is so low that even a p = 0 payment is frozen; they need review. `quarantinedByReason` breaks quarantines down by reason. Trust-based quarantines (`trust_below_threshold`, `trust_input_invalid`) are model decisions, so self-heal never re-scores them; they appear as stalled quarantines for operator action.
 - **Tune parameters:** all `TRUST_*` variables are listed in `.env.example`. Startup refuses invalid or self-contradictory settings, for example a freeze threshold that no new agent could ever pass. Each new parameter set is recorded as a `trust_config_snapshots` row.
 
+## Frozen-payout queue and SLA
+
+Frozen commission waits for an admin: a QUARANTINED escrow (model decision, stalled fail-safe, trust freeze or security hold, UFAA-frozen included) or an UNRESOLVED payout.
+
+- **The queue:** `GET /api/v1/admin/frozen-payouts` (MERCHANT_ADMIN token) lists every frozen item, overdue first, then oldest first. Each list is capped at 200 and `totals` gives the full counts. Phones are masked. It is read-only: release, reject and override belong to the risk-oversight queue (#14). An UNRESOLVED payout is still settled with `npm run payout:resolve`, which takes it off the list.
+- **The clock:** an escrow's `frozen_at` is set by a database trigger whenever it enters QUARANTINED, and it is cleared when the escrow leaves. A later re-quarantine starts a new spell. A payout's `unresolved_at` is set when it becomes UNRESOLVED.
+- **The SLA:** 72 h for an escrow (`FROZEN_ESCROW_SLA_HOURS`) and 24 h for a payout (`UNRESOLVED_PAYOUT_SLA_HOURS`). Each housekeeping sweep (at most hourly, only inside `PAYOUT_REMINDER_HOURS`, 08:00–20:00 Nairobi) marks each overdue spell once (`sla_escalated_at`). It sends every active MERCHANT_ADMIN one SMS digest with counts and KES totals only. A breach at night escalates at the next daytime sweep. With no active admin the items are still marked and a WARN is logged. The sweep runs even with `PAYOUTS_ENABLED=false`. `/health/details` reports `frozenSla` (escalated, alertsSent, alertsFailed).
+
 ## Deployment
+
+Migration `009_frozen_sla_escalation.sql` adds the freeze clocks and the trigger. It backfills `frozen_at` from the latest verification time (or the migration time) and `unresolved_at` from the payout's last update. It alters `escrow_accounts` and `payouts`, backfills them and builds the indexes in one transaction, so it holds table locks until COMMIT. Like 003 and 004, run it in a quiet window.
 
 Migration `004_trust_scores.sql` is required. It resets existing agents to 0.5 (no history credit), backfills `quarantine_reason`, and aborts with a list of IDs if legacy data has duplicate trust rows. Like 003, it takes ACCESS EXCLUSIVE locks until COMMIT, so run it in a maintenance window.

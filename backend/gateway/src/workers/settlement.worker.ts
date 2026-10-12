@@ -25,6 +25,7 @@ import { field, ownErrorCode, type JsonRecord } from '../domain/unknown';
 import { settlementWorkerConfig, type SettlementWorkerConfig } from '../config/worker';
 import { payoutDestinationService, payoutsEnabled, type PayoutDestinationService } from '../services/payout_destination.service';
 import { payoutService, type PayoutService } from '../services/payout.service';
+import { FrozenPayoutService, frozenPayoutService } from '../services/frozen.service';
 import {
   CallbackParseError,
   extractIngress,
@@ -99,6 +100,8 @@ export interface SettlementWorkerDeps {
   payouts?: Pick<PayoutDestinationService, 'sweep'>;
   /** Payout Transaction Status recovery (spec gh-11, part 2); runs only while PAYOUTS_ENABLED=true. */
   payoutClaims?: Pick<PayoutService, 'sweep' | 'remindUnclaimed'>;
+  /** Frozen-payout SLA escalation (spec gh-11, part 3c); runs whatever PAYOUTS_ENABLED says. */
+  frozen?: Pick<FrozenPayoutService, 'escalate'>;
 }
 
 const isUniqueViolation = (e: unknown, constraint?: string): boolean =>
@@ -112,6 +115,7 @@ export class SettlementWorker {
   readonly config: SettlementWorkerConfig;
   private readonly payouts: Pick<PayoutDestinationService, 'sweep'>;
   private readonly payoutClaims: Pick<PayoutService, 'sweep' | 'remindUnclaimed'>;
+  private readonly frozen: Pick<FrozenPayoutService, 'escalate'>;
 
   private running = false;
   private loopPromise: Promise<void> | null = null;
@@ -126,6 +130,7 @@ export class SettlementWorker {
     this.spool = deps.spool === undefined ? spoolService : deps.spool;
     this.payouts = deps.payouts ?? payoutDestinationService;
     this.payoutClaims = deps.payoutClaims ?? payoutService;
+    this.frozen = deps.frozen ?? (deps.pool ? new FrozenPayoutService({ db: deps.pool }) : frozenPayoutService);
     this.config = { ...settlementWorkerConfig(), ...deps.config };
   }
 
@@ -210,6 +215,8 @@ export class SettlementWorker {
       await this.payoutClaims.sweep().catch((e) => console.error('[SettlementWorker] payout status sweep failed:', (e as Error).message));
       await this.payoutClaims.remindUnclaimed().catch((e) => console.error('[SettlementWorker] unclaimed reminder sweep failed:', (e as Error).message));
     }
+    // Quarantines exist without payouts: the SLA sweep is outside the PAYOUTS_ENABLED gate.
+    await this.frozen.escalate().catch((e) => console.error('[SettlementWorker] frozen-payout SLA sweep failed:', (e as Error).message));
   }
 
   /**
