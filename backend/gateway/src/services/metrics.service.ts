@@ -20,8 +20,8 @@ export class GatewayMetrics {
   readonly stkCallbacksFailed = { recorded: 0, unmatched: 0 };
   /** Payout-destination verification (spec gh-11): B2C outcomes, results applied, alerts. */
   readonly payouts = { ACCEPTED: 0, REJECTED: 0, UNKNOWN: 0, rateLimited: 0, activated: 0, rejected: 0, expired: 0, cancelled: 0, alertsSent: 0, alertsFailed: 0 };
-  /** Agent-claimed payouts (spec gh-11, part 2): claims, outcomes, Transaction Status queries. */
-  readonly payoutClaims = { claimed: 0, paid: 0, failed: 0, unknown: 0, unresolved: 0, nameMismatch: 0, statusQueries: 0 };
+  /** Agent-claimed payouts (spec gh-11, part 2): claims, outcomes, Transaction Status queries, unclaimed reminders (part 3a). */
+  readonly payoutClaims = { claimed: 0, paid: 0, failed: 0, unknown: 0, unresolved: 0, nameMismatch: 0, statusQueries: 0, reminders: 0, remindersFailed: 0 };
   private readonly darajaLatency: number[] = [];
   globalLoginFailureAlarm = false;
 

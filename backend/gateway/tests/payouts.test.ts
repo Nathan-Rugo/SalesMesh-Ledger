@@ -70,9 +70,15 @@ describe('consent hash', () => {
 
 describe('PAYOUT_* config', () => {
   it('defaults, overrides and refusals', () => {
-    expect(payoutConfig({})).toEqual({ minAmount: 10, maxAmount: 150_000, statusAfterMs: 600_000, statusMaxAttempts: 6, disclosureVersion: '1' });
+    expect(payoutConfig({})).toEqual({
+      minAmount: 10, maxAmount: 150_000, statusAfterMs: 600_000, statusMaxAttempts: 6, disclosureVersion: '1', reminderDays: [7, 30, 90], reminderHours: [8, 20],
+    });
+    expect(payoutConfig({ PAYOUT_REMINDER_DAYS: ' 3, 14 ,60', PAYOUT_REMINDER_HOURS: '0,24' })).toMatchObject({ reminderDays: [3, 14, 60], reminderHours: [0, 24] });
     expect(payoutConfig({ PAYOUT_MIN_AMOUNT: '50', PAYOUT_STATUS_MAX_ATTEMPTS: '3' })).toMatchObject({ minAmount: 50, statusMaxAttempts: 3 });
-    for (const bad of [{ PAYOUT_MIN_AMOUNT: '0' }, { PAYOUT_MAX_AMOUNT: '1.5' }, { PAYOUT_MIN_AMOUNT: '200', PAYOUT_MAX_AMOUNT: '100' }, { PAYOUT_DISCLOSURE_VERSION: '9' }]) {
+    for (const bad of [{ PAYOUT_MIN_AMOUNT: '0' }, { PAYOUT_MAX_AMOUNT: '1.5' }, { PAYOUT_MIN_AMOUNT: '200', PAYOUT_MAX_AMOUNT: '100' }, { PAYOUT_DISCLOSURE_VERSION: '9' },
+      { PAYOUT_REMINDER_DAYS: '7,30' }, { PAYOUT_REMINDER_DAYS: '7,30,90,120' }, { PAYOUT_REMINDER_DAYS: '7,7,90' }, { PAYOUT_REMINDER_DAYS: '30,7,90' },
+      { PAYOUT_REMINDER_DAYS: '0,30,90' }, { PAYOUT_REMINDER_DAYS: '7,30,x' }, { PAYOUT_REMINDER_DAYS: '7,-30,90' }, { PAYOUT_REMINDER_DAYS: '7.5,30,90' },
+      { PAYOUT_REMINDER_HOURS: '20,8' }, { PAYOUT_REMINDER_HOURS: '8' }, { PAYOUT_REMINDER_HOURS: '8,25' }]) {
       expect(() => payoutConfig(bad)).toThrow(PayoutConfigError);
     }
   });
@@ -82,6 +88,9 @@ describe('PAYOUT_* config', () => {
     const db: any = { query: jest.fn(async () => ({ rows: [{}] })) };
     expect((await preflight(env, db)).fatal.join('\n')).not.toMatch(/PAYOUT_DISCLOSURE_VERSION/);
     expect((await preflight({ ...env, PAYOUTS_ENABLED: 'true' }, db)).fatal.join('\n')).toMatch(/PAYOUT_DISCLOSURE_VERSION 9 has no disclosure text/);
+    const days = { PAYOUT_REMINDER_DAYS: '30,7,90' };
+    expect((await preflight(days, db)).fatal.join('\n')).not.toMatch(/PAYOUT_REMINDER_DAYS/);
+    expect((await preflight({ ...days, PAYOUTS_ENABLED: 'true' }, db)).fatal.join('\n')).toMatch(/PAYOUT_REMINDER_DAYS must be 3 strictly increasing/);
   });
 });
 
@@ -194,15 +203,21 @@ describe('PAYOUTS_ENABLED gate', () => {
     }
   });
 
-  it('the settlement worker housekeeping runs the payout status sweep only while PAYOUTS_ENABLED=true', async () => {
+  it('the settlement worker housekeeping runs the payout status sweep and unclaimed reminders only while PAYOUTS_ENABLED=true', async () => {
     const sweep = jest.fn(async () => ({ queried: 0, unresolved: 0 }));
-    const w = new SettlementWorker({ pool: fakeDb, spool: null, payouts: { sweep: jest.fn(async () => ({ promoted: 0, expired: 0 })) }, payoutClaims: { sweep } });
+    const remindUnclaimed = jest.fn(async () => { throw new Error('db down'); });
+    const w = new SettlementWorker({ pool: fakeDb, spool: null, payouts: { sweep: jest.fn(async () => ({ promoted: 0, expired: 0 })) }, payoutClaims: { sweep, remindUnclaimed } });
+    const err = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     process.env.PAYOUTS_ENABLED = 'false';
     await w.housekeeping(true);
     expect(sweep).not.toHaveBeenCalled();
+    expect(remindUnclaimed).not.toHaveBeenCalled();
     process.env.PAYOUTS_ENABLED = 'true';
-    await w.housekeeping(true);
+    await w.housekeeping(true); // a reminder failure is logged, never thrown
     expect(sweep).toHaveBeenCalledTimes(1);
+    expect(remindUnclaimed).toHaveBeenCalledTimes(1);
+    expect(err).toHaveBeenCalledWith(expect.stringMatching(/unclaimed reminder sweep failed/), 'db down');
+    err.mockRestore();
     delete process.env.PAYOUTS_ENABLED;
   });
 });
