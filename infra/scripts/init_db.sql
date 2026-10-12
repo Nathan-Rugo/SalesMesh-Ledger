@@ -235,7 +235,8 @@ CREATE TABLE IF NOT EXISTS security_events (
         'ADMIN_UNLOCK', 'ADMIN_DISABLE', 'ADMIN_PIN_RESET',
         'RECONCILE_AMOUNT_MISMATCH', 'PAYMENT_REVERSED', 'RECONCILED_CALLBACK_LATE',
         'RECONCILE_ATTRIBUTION_CONFLICT', 'RECONCILE_NOT_ON_STATEMENT', 'STK_STATUS_CONFLICT',
-        'PAYOUT_DESTINATION_CHANGED', 'PAYOUT_STATUS_CHANGED', 'PAYOUT_NAME_MISMATCH')),
+        'PAYOUT_DESTINATION_CHANGED', 'PAYOUT_STATUS_CHANGED', 'PAYOUT_NAME_MISMATCH',
+        'UFAA_NOTICE_SENT', 'UFAA_REPORTED', 'UFAA_REMITTED')),
     mpesa_receipt_id VARCHAR(50),
     subject_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
     family_id UUID,
@@ -406,6 +407,45 @@ CREATE INDEX IF NOT EXISTS payouts_agent_idx ON payouts (agent_id, created_at);
 CREATE INDEX IF NOT EXISTS payouts_status_check_idx ON payouts (created_at) WHERE status IN ('SENT', 'UNKNOWN');
 CREATE INDEX IF NOT EXISTS payouts_status_query_ids_idx ON payouts USING GIN (status_query_ids);
 
+-- Table 15: UFAA_RETURNS (spec gh-11, part 3b). One annual Unclaimed Financial Assets Act return per
+-- 30 June period: DRAFT → NOTICED (owners SMS-noticed) → REPORTED (holder report CSV written) →
+-- REMITTED (dormant escrows REMITTED after the CBK transfer). Driven by the ufaa:* admin CLIs.
+CREATE TABLE IF NOT EXISTS ufaa_returns (
+    return_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    period_end DATE NOT NULL UNIQUE
+        CONSTRAINT ufaa_returns_period_end_30_june CHECK (EXTRACT(MONTH FROM period_end) = 6 AND EXTRACT(DAY FROM period_end) = 30),
+    status VARCHAR(10) NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'NOTICED', 'REPORTED', 'REMITTED')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    noticed_at TIMESTAMPTZ,
+    reported_at TIMESTAMPTZ,
+    remitted_at TIMESTAMPTZ,
+    remittance_reference VARCHAR(100),
+    report_path TEXT,
+    noticed_cents BIGINT NOT NULL DEFAULT 0,
+    noticed_items INTEGER NOT NULL DEFAULT 0,
+    reported_cents BIGINT,
+    reported_items INTEGER,
+    remitted_cents BIGINT,
+    remitted_items INTEGER
+);
+-- One item per agent: the dormant escrows snapshotted at prepare time. dropped_at: an escrow left the
+-- claimable set before the report (claimed, quarantined, security-held), so the agent is not reported.
+-- Remit is per escrow: one security-held after the report stays frozen (ufaa_return_id), not REMITTED.
+CREATE TABLE IF NOT EXISTS ufaa_return_items (
+    item_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),   -- the holder reference in the report
+    return_id UUID NOT NULL REFERENCES ufaa_returns(return_id) ON DELETE RESTRICT,
+    agent_id UUID NOT NULL REFERENCES sales_agents(agent_id) ON DELETE RESTRICT,
+    escrow_ids UUID[] NOT NULL CHECK (cardinality(escrow_ids) > 0),
+    amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+    owner_name VARCHAR(255) NOT NULL,
+    msisdn VARCHAR(20) NOT NULL,
+    payable_from TIMESTAMPTZ NOT NULL,
+    notice_sent_at TIMESTAMPTZ,
+    dropped_at TIMESTAMPTZ,
+    CONSTRAINT ufaa_return_items_one_per_agent UNIQUE (return_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS ufaa_return_items_agent_idx ON ufaa_return_items (agent_id);
+
 -- Table 8: ESCROW_ACCOUNTS
 CREATE TABLE IF NOT EXISTS escrow_accounts (
     escrow_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -413,8 +453,11 @@ CREATE TABLE IF NOT EXISTS escrow_accounts (
     gross_commission DECIMAL(10,2) NOT NULL,
     hold_period_hours INTEGER NOT NULL DEFAULT 24,
     -- CLAIMED: matured and included in a payout still in flight (payout_id); RELEASED once PAID.
-    escrow_status VARCHAR(30) NOT NULL CHECK (escrow_status IN ('HELD', 'CLAIMED', 'QUARANTINED', 'RELEASED')),
+    -- REMITTED: dormant, transferred to the Unclaimed Financial Assets Authority (ufaa_return_id); final.
+    -- A HELD escrow with ufaa_return_id is frozen in a reported return: not claimable, awaiting remit.
+    escrow_status VARCHAR(30) NOT NULL CHECK (escrow_status IN ('HELD', 'CLAIMED', 'QUARANTINED', 'RELEASED', 'REMITTED')),
     payout_id UUID REFERENCES payouts(payout_id) ON DELETE RESTRICT,
+    ufaa_return_id UUID REFERENCES ufaa_returns(return_id) ON DELETE RESTRICT,
     release_due_at TIMESTAMPTZ NOT NULL,
     security_hold BOOLEAN NOT NULL DEFAULT FALSE,    -- payload mutation: self-heal never touches it
     rescore_attempts INTEGER NOT NULL DEFAULT 0,
@@ -428,7 +471,8 @@ CREATE TABLE IF NOT EXISTS escrow_accounts (
     -- Unclaimed reminders (spec gh-11 part 3a): highest stage sent for the cycle this oldest escrow keys.
     unclaimed_reminder_stage SMALLINT NOT NULL DEFAULT 0
         CONSTRAINT escrow_accounts_unclaimed_reminder_stage CHECK (unclaimed_reminder_stage BETWEEN 0 AND 3),
-    CONSTRAINT escrow_accounts_claimed_payout CHECK (escrow_status <> 'CLAIMED' OR payout_id IS NOT NULL)
+    CONSTRAINT escrow_accounts_claimed_payout CHECK (escrow_status <> 'CLAIMED' OR payout_id IS NOT NULL),
+    CONSTRAINT escrow_accounts_remitted_return CHECK (escrow_status <> 'REMITTED' OR ufaa_return_id IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS escrow_accounts_claimable_idx
     ON escrow_accounts (release_due_at) WHERE escrow_status = 'HELD' AND NOT security_hold;
@@ -488,5 +532,5 @@ CREATE TABLE IF NOT EXISTS tax_deductions (
 -- A fresh install already has every migration's shape.
 INSERT INTO schema_migrations (version) VALUES ('001_settlement_pipeline'), ('002_auth_stk_initiation'), ('003_reconciliation'),
                                                ('004_trust_scores'), ('005_payout_destinations'), ('006_payout_claims'),
-                                               ('007_unclaimed_reminders')
+                                               ('007_unclaimed_reminders'), ('008_ufaa_remittance')
     ON CONFLICT (version) DO NOTHING;

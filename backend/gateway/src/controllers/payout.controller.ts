@@ -3,7 +3,7 @@
  * @description /api/v1/payouts (spec gh-11, part 2) — HTTP mapping only; the flow lives in
  * services/payout.service.ts. Phones are always masked in responses; names never appear.
  *
- *   GET  /                               → 200 {balance, destination, disclosure, payouts}
+ *   GET  /                               → 200 {balance, destination, disclosure, payouts, remitted}
  *   POST /claim {pin, disclosure_version} → 202 {payout: SENT | UNKNOWN} | 502 FAILED | 503 not sent | 409 refused
  */
 
@@ -47,6 +47,15 @@ export class PayoutController {
       destination_changing: r.destinationChanging,
       disclosure: r.disclosure,
       payouts: r.payouts.map(view),
+      remitted: r.remitted.map((x) => ({
+        amount: x.cents / 100,
+        period_end: x.periodEnd,
+        reference: x.reference,
+        holder_reference: x.holderReference,
+        note: x.reference
+          ? 'Transferred to the Unclaimed Financial Assets Authority: claim from UFAA.'
+          : 'Being transferred to the Unclaimed Financial Assets Authority (UFAA).',
+      })),
     });
   }
 

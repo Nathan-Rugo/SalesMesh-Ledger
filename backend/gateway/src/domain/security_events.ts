@@ -25,7 +25,11 @@ export type SecurityEventType =
   | 'PAYOUT_DESTINATION_CHANGED'
   // Agent-claimed payouts (spec gh-11, part 2): every payout state change; a paid name that differs from full_name
   | 'PAYOUT_STATUS_CHANGED'
-  | 'PAYOUT_NAME_MISMATCH';
+  | 'PAYOUT_NAME_MISMATCH'
+  // UFAA return (spec gh-11, part 3b): one per agent per step (notice, report, remit)
+  | 'UFAA_NOTICE_SENT'
+  | 'UFAA_REPORTED'
+  | 'UFAA_REMITTED';
 
 /**
  * Receipt events that put the receipt's escrow on security hold (QUARANTINED, never self-healed),

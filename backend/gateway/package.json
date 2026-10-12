@@ -21,6 +21,9 @@
     "trust:adjust": "node dist/scripts/trust-adjust.js",
     "payout:cancel": "node dist/scripts/payout-cancel.js",
     "payout:resolve": "node dist/scripts/payout-resolve.js",
+    "ufaa:prepare": "node dist/scripts/ufaa-prepare.js",
+    "ufaa:report": "node dist/scripts/ufaa-report.js",
+    "ufaa:remit": "node dist/scripts/ufaa-remit.js",
     "lint:fix": "eslint . --fix"
   },
   "dependencies": {
