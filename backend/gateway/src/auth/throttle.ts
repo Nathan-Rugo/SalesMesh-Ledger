@@ -427,3 +427,20 @@ export class StkRateLimiter {
     return { allowed: size <= this.perMinute, retryAfterS: Math.max(1, Math.ceil(((window + 1) * 60_000 - now) / 1000)) };
   }
 }
+
+/** Payout-destination verifications (B2C) per agent per 24 h (spec gh-11). */
+export class PayoutVerificationLimiter {
+  constructor(
+    private readonly store: ThrottleStore = new RedisThrottleStore(),
+    readonly perDay = 3
+  ) {}
+
+  /** Counts one verification. Throws ThrottleUnavailableError when Redis cannot answer. */
+  async hit(agentId: string): Promise<{ allowed: boolean; retryAfterS: number }> {
+    const key = `payout:verify:${agentId}`;
+    const n = await this.store.incr(key, 24 * 3600_000);
+    if (n <= this.perDay) return { allowed: true, retryAfterS: 0 };
+    const ttl = await this.store.ttl(key);
+    return { allowed: false, retryAfterS: Math.max(1, Math.ceil((ttl !== null && Number.isFinite(ttl) ? ttl : 24 * 3600_000) / 1000)) };
+  }
+}

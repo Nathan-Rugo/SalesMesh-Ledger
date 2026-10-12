@@ -710,6 +710,21 @@ describe('spec gh-5 — the real app mounts auth, payments, CORS and readiness',
     }
   });
 
+  it('payout destinations (spec gh-11) are mounted: unauthenticated GET → 401/503 (not 404); a DELETE preflight lists DELETE', async () => {
+    expect([401, 503]).toContain((await raw('GET', '/api/v1/payout-destinations')).status);
+    process.env.CORS_ORIGINS = 'https://pwa.salesmesh.example';
+    try {
+      const pre = await raw('OPTIONS', '/api/v1/payout-destinations/00000000-0000-0000-0000-000000000000', {
+        Origin: 'https://pwa.salesmesh.example',
+        'Access-Control-Request-Method': 'DELETE',
+        'Access-Control-Request-Headers': 'content-type,authorization',
+      });
+      expect(String(pre.headers['access-control-allow-methods'])).toContain('DELETE');
+    } finally {
+      delete process.env.CORS_ORIGINS;
+    }
+  });
+
   it('/health/ready → 503 degraded when Redis is down, and when Postgres is down', async () => {
     const err = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     try {

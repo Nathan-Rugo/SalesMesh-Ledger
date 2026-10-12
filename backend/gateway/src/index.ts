@@ -6,7 +6,8 @@
  *   The Upstream Ingestion Gateway receives Safaricom Daraja webhooks,
  *   applies security hardening, and routes traffic to the webhook controller.
  *   Agents authenticate with phone + PIN (RS256 access tokens, rotating refresh
- *   cookies — /api/v1/auth) and trigger STK Pushes (/api/v1/payments/stk).
+ *   cookies — /api/v1/auth), trigger STK Pushes (/api/v1/payments/stk) and register a verified
+ *   M-Pesa payout destination (/api/v1/payout-destinations, PAYOUTS_ENABLED=true).
  *   Health: /health/live and /health/ready are minimal unauthenticated probes;
  *   /health/details (MERCHANT_ADMIN) reports queue, ML, login, STK and Daraja metrics.
  *
@@ -29,7 +30,7 @@ import { redisClient, isRedisHealthy, shutdownRedis } from './config/redis';
 import pool, { isDbHealthy, shutdownDb } from './config/db';
 import { assertPiiKey } from './config/pii';
 import { loadJwtKeyring } from './config/jwt';
-import { darajaConfig } from './daraja/client';
+import { b2cConfig, darajaConfig } from './daraja/client';
 import { overdueAfterMs, reconcileEnabled } from './config/reconcile';
 import { trustConfig } from './config/trust';
 import { corsOrigins, publicOrigin, requireAuth } from './auth/middleware';
@@ -39,7 +40,9 @@ import type { Db } from './repositories/db.types';
 import webhookRoutes from './routes/webhook.routes';
 import { createAuthRouter } from './routes/auth.routes';
 import { createPaymentsRouter, stkEnabled } from './routes/payments.routes';
+import { createPayoutDestinationRouter } from './routes/payout_destination.routes';
 import { metrics } from './services/metrics.service';
+import { payoutDestinationService, payoutsEnabled } from './services/payout_destination.service';
 
 // ── Services (for health endpoint and shutdown) ───────────────────────
 import { resilientRiskClient } from './services/risk_client.service';
@@ -72,7 +75,7 @@ if (trustProxy !== undefined) app.set('trust proxy', trustProxy);
 
 /** The callback/validation URLs carry MPESA_CALLBACK_TOKEN: never log it. */
 export function redactPath(path: string): string {
-  return path.replace(/\/(callback|validation)\/[^/?#]*/g, '/$1/:token');
+  return path.replace(/\/(callback|validation|b2c\/result|b2c\/timeout)\/[^/?#]*/g, '/$1/:token');
 }
 
 let isShuttingDown = false;
@@ -87,7 +90,7 @@ app.use(
   cors({
     origin: (origin, cb) => cb(null, origin !== undefined && corsOrigins().includes(origin) ? origin : false),
     credentials: true,
-    methods: ['GET', 'POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'Idempotency-Key'],
     exposedHeaders: ['Retry-After', 'X-Request-ID'],
   })
@@ -130,6 +133,7 @@ app.use('/', webhookRoutes);
 // 7. Agent authentication and STK Push initiation (each router parses its own small JSON bodies)
 app.use('/api/v1/auth', createAuthRouter());
 app.use('/api/v1/payments', createPaymentsRouter());
+app.use('/api/v1/payout-destinations', createPayoutDestinationRouter());
 
 // ── Health Check Endpoints ────────────────────────────────────────────
 /** GET /health/live — the process is up. No dependencies, no metrics. */
@@ -200,6 +204,7 @@ app.get('/health/details', detailsAuth, async (_req: Request, res: Response) => 
       ...metrics.snapshot(),
       countersScope: 'per-process', // login / STK / Daraja counters reset on restart and are not summed across replicas
       stkEnabled: stkEnabled(),
+      payoutsEnabled: payoutsEnabled(),
       uptime: process.uptime(),
     });
   } catch (err) {
@@ -238,6 +243,7 @@ const gracefulShutdown = async (signal: string, exitCode = 0) => {
   try {
     await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
     await Promise.all([settlementWorker.stop(10_000), rescoreWorker.stop(10_000), reconcileWorker.stop(10_000)]);
+    await payoutDestinationService.settled(); // in-flight alerts still read the pool
     await shutdownRedis();
     await shutdownDb();
     console.info('[Shutdown] All connections closed cleanly.');
@@ -259,11 +265,12 @@ process.on('uncaughtException', (err) => {
 });
 
 // ── Start Listener ────────────────────────────────────────────────────
-export const REQUIRED_MIGRATION = '004_trust_scores';
+export const REQUIRED_MIGRATION = '005_payout_destinations';
 
 /**
  * Startup gates, without side effects: `fatal` problems refuse the start, `warnings` are logged.
- * Secrets, the JWT key ring, Daraja (when STK_ENABLED or RECONCILE_ENABLED), the callback token,
+ * Secrets, the JWT key ring, Daraja (when STK_ENABLED or RECONCILE_ENABLED), Daraja B2C (when
+ * PAYOUTS_ENABLED), the callback token,
  * the schema version.
  */
 export async function preflight(env: NodeJS.ProcessEnv, db: Db): Promise<{ fatal: string[]; warnings: string[] }> {
@@ -281,6 +288,10 @@ export async function preflight(env: NodeJS.ProcessEnv, db: Db): Promise<{ fatal
   gate(() => trustConfig(env)); // risk-adaptive hold parameters (spec gh-23): every escrow hold depends on them
   // STK initiation and the STK Query reconciliation sweep both need the Daraja credentials.
   if (stkEnabled(env) || reconcileEnabled(env)) gate(() => darajaConfig(env));
+  // Payout-destination verification (spec gh-11) needs the B2C initiator; Twilio stays optional.
+  if (payoutsEnabled(env)) gate(() => b2cConfig(env));
+  const twilio = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_WHATSAPP_FROM'].filter((k) => env[k]?.trim());
+  if (twilio.length > 0 && twilio.length < 3) warnings.push('TWILIO_* is only partly set: payout alerts are log-only until all three are set');
   if (!env.MPESA_CALLBACK_TOKEN) fatal.push('MPESA_CALLBACK_TOKEN is not set (every Daraja callback would be rejected)');
   try {
     const { rows } = await db.query('SELECT 1 FROM schema_migrations WHERE version = $1', [REQUIRED_MIGRATION]);

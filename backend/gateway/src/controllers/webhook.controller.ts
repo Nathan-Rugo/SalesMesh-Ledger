@@ -61,6 +61,8 @@ import { metrics } from '../services/metrics.service';
 import { idempotencyService } from '../services/idempotency.service';
 import { spoolService } from '../services/spool.service';
 import { settlementWorker } from '../workers/settlement.worker';
+import { parseB2cResult } from '../daraja/client';
+import { payoutDestinationService } from '../services/payout_destination.service';
 
 const ACK = { ResultCode: 0, ResultDesc: 'Accepted' } as const;
 const RETRY_LATER = { ResultCode: 1, ResultDesc: 'Temporarily unavailable; retry' } as const;
@@ -389,6 +391,38 @@ class WebhookController {
 
   private async spool(receipt: string, hash: string, channel: SourceChannel, payload: unknown): Promise<void> {
     await spoolService.spool({ receipt, hash, channel, payload, receivedAt: new Date().toISOString() });
+  }
+
+  /**
+   * POST /api/v1/mpesa/b2c/result/:token — the result of a payout-destination verification
+   * (spec gh-11). Applied at most once; unknown or repeated results are ACKed. 503 (Daraja
+   * retries) only when the result could not be recorded. The registered name is never logged.
+   */
+  public async handleB2cResult(req: Request, res: Response): Promise<void> {
+    const result = parseB2cResult(req.body);
+    if (!result) {
+      console.warn(`[Webhook] B2C result unparseable (${payloadShape(req.body)}) — ACK and drop.`);
+      res.status(200).json(ACK);
+      return;
+    }
+    try {
+      const outcome = await payoutDestinationService.applyResult(result);
+      if (outcome.kind !== 'applied') console.info(`[Webhook] B2C result ${outcome.kind} (ResultCode ${result.resultCode}) — ACK.`);
+      res.status(200).json(ACK);
+    } catch (error) {
+      console.error(`[Webhook] could not apply the B2C result (${(error as Error).message}) — 503.`);
+      if (!res.headersSent) res.status(503).json(RETRY_LATER);
+    }
+  }
+
+  /**
+   * POST /api/v1/mpesa/b2c/timeout/:token — Daraja's queue timeout. Logged and ACKed only: the
+   * row stays PENDING_VERIFICATION until a result arrives or the expiry sweep (never a resend).
+   */
+  public handleB2cTimeout(req: Request, res: Response): void {
+    const id = field(req.body, 'Result', 'OriginatorConversationID');
+    console.warn(`[Webhook] B2C queue timeout for ${typeof id === 'string' ? id.slice(0, 64) : 'an unknown request'} — ACK.`);
+    res.status(200).json(ACK);
   }
 
   /**

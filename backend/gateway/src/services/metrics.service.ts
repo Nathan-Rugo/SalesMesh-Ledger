@@ -1,7 +1,7 @@
 /**
  * @file metrics.service.ts
  * @description In-process counters reported on /health/details (spec gh-5): login outcomes,
- * STK initiation outcomes and Daraja latency. Process-local and reset on restart.
+ * STK initiation outcomes, payout-destination verification and Daraja latency. Process-local and reset on restart.
  */
 
 const LATENCY_SAMPLES = 200;
@@ -18,6 +18,8 @@ export class GatewayMetrics {
     possibleDuplicate: 0,
   };
   readonly stkCallbacksFailed = { recorded: 0, unmatched: 0 };
+  /** Payout-destination verification (spec gh-11): B2C outcomes, results applied, alerts. */
+  readonly payouts = { ACCEPTED: 0, REJECTED: 0, UNKNOWN: 0, rateLimited: 0, activated: 0, rejected: 0, expired: 0, cancelled: 0, alertsSent: 0, alertsFailed: 0 };
   private readonly darajaLatency: number[] = [];
   globalLoginFailureAlarm = false;
 
@@ -33,6 +35,7 @@ export class GatewayMetrics {
       login: { ...this.login, globalFailureAlarm: this.globalLoginFailureAlarm },
       refresh: { ...this.refresh },
       stk: { ...this.stk, failedCallbacks: { ...this.stkCallbacksFailed } },
+      payouts: { ...this.payouts },
       darajaLatencyMs: { samples: sorted.length, p50: q(0.5), p95: q(0.95), max: sorted.length ? Math.round(sorted[sorted.length - 1]) : null },
     };
   }

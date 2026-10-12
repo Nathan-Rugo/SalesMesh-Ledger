@@ -75,13 +75,7 @@ CREATE TABLE IF NOT EXISTS auth_events (
 );
 CREATE INDEX IF NOT EXISTS auth_events_occurred_idx ON auth_events (occurred_at);
 
--- Table 2: WALLETS
-CREATE TABLE IF NOT EXISTS wallets (
-    wallet_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE RESTRICT,
-    wallet_type VARCHAR(30) NOT NULL CHECK (wallet_type IN ('MPESA_B2C', 'BANK_PAYSTACK')),
-    account_id VARCHAR(100) NOT NULL
-);
+-- Table 2 (WALLETS) was an unused placeholder, dropped by migration 005; see payout_destinations.
 
 -- Table 3: RETAIL_OUTLETS
 CREATE TABLE IF NOT EXISTS retail_outlets (
@@ -236,7 +230,8 @@ CREATE TABLE IF NOT EXISTS security_events (
         'REFRESH_TOKEN_REUSE', 'LOGIN_LOCKOUT', 'PIN_CHANGED',
         'ADMIN_UNLOCK', 'ADMIN_DISABLE', 'ADMIN_PIN_RESET',
         'RECONCILE_AMOUNT_MISMATCH', 'PAYMENT_REVERSED', 'RECONCILED_CALLBACK_LATE',
-        'RECONCILE_ATTRIBUTION_CONFLICT', 'RECONCILE_NOT_ON_STATEMENT', 'STK_STATUS_CONFLICT')),
+        'RECONCILE_ATTRIBUTION_CONFLICT', 'RECONCILE_NOT_ON_STATEMENT', 'STK_STATUS_CONFLICT',
+        'PAYOUT_DESTINATION_CHANGED')),
     mpesa_receipt_id VARCHAR(50),
     subject_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
     family_id UUID,
@@ -252,6 +247,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS security_events_family_dedup
     ON security_events (event_type, family_id) WHERE family_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS security_events_stk_dedup
     ON security_events (event_type, stk_request_id) WHERE stk_request_id IS NOT NULL;
+-- The agent's in-app list of recent payout-destination events (spec gh-11).
+CREATE INDEX IF NOT EXISTS security_events_payout_destination_idx
+    ON security_events (subject_user_id, detected_at) WHERE event_type = 'PAYOUT_DESTINATION_CHANGED';
 
 -- Table 5: TRANSACTIONS
 CREATE TABLE IF NOT EXISTS transactions (
@@ -420,7 +418,31 @@ CREATE TABLE IF NOT EXISTS payout_disbursements (
     disbursed_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- Table 13: PAYOUT_DESTINATIONS (spec gh-11). An agent's personal M-Pesa payout destination: their
+-- login phone, proven theirs by a KES 1.00 B2C payment whose registered name must match full_name.
+-- The phone is pinned on the row, so after a phone change a replacement waits out a cooling-off.
+CREATE TABLE IF NOT EXISTS payout_destinations (
+    destination_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),  -- also the B2C OriginatorConversationID
+    agent_id UUID NOT NULL REFERENCES sales_agents(agent_id) ON DELETE RESTRICT,
+    msisdn VARCHAR(12) NOT NULL CHECK (msisdn ~ '^254[17][0-9]{8}$'),
+    status VARCHAR(25) NOT NULL DEFAULT 'PENDING_VERIFICATION' CHECK (status IN (
+        'PENDING_VERIFICATION', 'COOLING_OFF', 'ACTIVE', 'SUPERSEDED', 'REJECTED', 'EXPIRED', 'CANCELLED')),
+    reject_reason VARCHAR(40),
+    conversation_id VARCHAR(100),
+    result_code VARCHAR(20),
+    sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    verified_at TIMESTAMPTZ,
+    cooling_off_until TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT payout_destinations_cooling_off_until CHECK (status <> 'COOLING_OFF' OR cooling_off_until IS NOT NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS payout_destinations_one_active
+    ON payout_destinations (agent_id) WHERE status = 'ACTIVE';
+CREATE UNIQUE INDEX IF NOT EXISTS payout_destinations_one_in_flight
+    ON payout_destinations (agent_id) WHERE status IN ('PENDING_VERIFICATION', 'COOLING_OFF');
+
 -- A fresh install already has every migration's shape.
 INSERT INTO schema_migrations (version) VALUES ('001_settlement_pipeline'), ('002_auth_stk_initiation'), ('003_reconciliation'),
-                                               ('004_trust_scores')
+                                               ('004_trust_scores'), ('005_payout_destinations')
     ON CONFLICT (version) DO NOTHING;
