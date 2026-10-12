@@ -22,7 +22,10 @@ export type SecurityEventType =
   | 'RECONCILE_NOT_ON_STATEMENT'
   | 'STK_STATUS_CONFLICT'
   // Payout destinations (spec gh-11): registration, activation, rejection, cancellation, expiry
-  | 'PAYOUT_DESTINATION_CHANGED';
+  | 'PAYOUT_DESTINATION_CHANGED'
+  // Agent-claimed payouts (spec gh-11, part 2): every payout state change; a paid name that differs from full_name
+  | 'PAYOUT_STATUS_CHANGED'
+  | 'PAYOUT_NAME_MISMATCH';
 
 /**
  * Receipt events that put the receipt's escrow on security hold (QUARANTINED, never self-healed),

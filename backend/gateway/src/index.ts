@@ -7,7 +7,8 @@
  *   applies security hardening, and routes traffic to the webhook controller.
  *   Agents authenticate with phone + PIN (RS256 access tokens, rotating refresh
  *   cookies — /api/v1/auth), trigger STK Pushes (/api/v1/payments/stk) and register a verified
- *   M-Pesa payout destination (/api/v1/payout-destinations, PAYOUTS_ENABLED=true).
+ *   M-Pesa payout destination (/api/v1/payout-destinations) and claim matured commission
+ *   (/api/v1/payouts), both with PAYOUTS_ENABLED=true.
  *   Health: /health/live and /health/ready are minimal unauthenticated probes;
  *   /health/details (MERCHANT_ADMIN) reports queue, ML, login, STK and Daraja metrics.
  *
@@ -41,8 +42,12 @@ import webhookRoutes from './routes/webhook.routes';
 import { createAuthRouter } from './routes/auth.routes';
 import { createPaymentsRouter, stkEnabled } from './routes/payments.routes';
 import { createPayoutDestinationRouter } from './routes/payout_destination.routes';
+import { createPayoutRouter } from './routes/payout.routes';
 import { metrics } from './services/metrics.service';
 import { payoutDestinationService, payoutsEnabled } from './services/payout_destination.service';
+import { payoutService } from './services/payout.service';
+import { payoutConfig } from './domain/payout';
+import { payoutStats } from './repositories/payout.repository';
 
 // ── Services (for health endpoint and shutdown) ───────────────────────
 import { resilientRiskClient } from './services/risk_client.service';
@@ -134,6 +139,7 @@ app.use('/', webhookRoutes);
 app.use('/api/v1/auth', createAuthRouter());
 app.use('/api/v1/payments', createPaymentsRouter());
 app.use('/api/v1/payout-destinations', createPayoutDestinationRouter());
+app.use('/api/v1/payouts', createPayoutRouter());
 
 // ── Health Check Endpoints ────────────────────────────────────────────
 /** GET /health/live — the process is up. No dependencies, no metrics. */
@@ -169,12 +175,13 @@ app.get('/health/details', detailsAuth, async (_req: Request, res: Response) => 
     const isHealthy = redisOk && dbOk;
 
     // Queue observability; best effort (null when the DB cannot answer within ~1.5 s).
-    const [queue, quarantine, spoolDepth, recon, trust] = await Promise.all([
+    const [queue, quarantine, spoolDepth, recon, trust, payoutsByStatus] = await Promise.all([
       dbOk ? withTimeout(queueStats(pool)) : null,
       dbOk ? withTimeout(quarantineStats(pool, rescoreWorker.config.maxAttempts)) : null,
       spoolService.depth(),
       dbOk ? withTimeout(reconcileStats(pool, overdueAfterMs(reconcileWorker.config))) : null,
       dbOk ? withTimeout(trustStats(pool)) : null,
+      dbOk ? withTimeout(payoutStats(pool)) : null,
     ]);
 
     res.status(isHealthy ? 200 : 503).json({
@@ -205,6 +212,7 @@ app.get('/health/details', detailsAuth, async (_req: Request, res: Response) => 
       countersScope: 'per-process', // login / STK / Daraja counters reset on restart and are not summed across replicas
       stkEnabled: stkEnabled(),
       payoutsEnabled: payoutsEnabled(),
+      payoutsByStatus, // spec gh-11 part 2: SENT / UNKNOWN / PAID / FAILED / UNRESOLVED (UNRESOLVED needs payout:resolve)
       uptime: process.uptime(),
     });
   } catch (err) {
@@ -243,7 +251,7 @@ const gracefulShutdown = async (signal: string, exitCode = 0) => {
   try {
     await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
     await Promise.all([settlementWorker.stop(10_000), rescoreWorker.stop(10_000), reconcileWorker.stop(10_000)]);
-    await payoutDestinationService.settled(); // in-flight alerts still read the pool
+    await Promise.all([payoutDestinationService.settled(), payoutService.settled()]); // in-flight alerts still read the pool
     await shutdownRedis();
     await shutdownDb();
     console.info('[Shutdown] All connections closed cleanly.');
@@ -265,7 +273,7 @@ process.on('uncaughtException', (err) => {
 });
 
 // ── Start Listener ────────────────────────────────────────────────────
-export const REQUIRED_MIGRATION = '005_payout_destinations';
+export const REQUIRED_MIGRATION = '006_payout_claims';
 
 /**
  * Startup gates, without side effects: `fatal` problems refuse the start, `warnings` are logged.
@@ -290,6 +298,7 @@ export async function preflight(env: NodeJS.ProcessEnv, db: Db): Promise<{ fatal
   if (stkEnabled(env) || reconcileEnabled(env)) gate(() => darajaConfig(env));
   // Payout-destination verification (spec gh-11) needs the B2C initiator; SMS alerts stay optional.
   if (payoutsEnabled(env)) gate(() => b2cConfig(env));
+  if (payoutsEnabled(env)) gate(() => payoutConfig(env)); // PAYOUT_* limits and a disclosure text for the version
   const sms = ['AFRICASTALKING_USERNAME', 'AFRICASTALKING_API_KEY'].filter((k) => env[k]?.trim());
   if (sms.length === 1) warnings.push('AFRICASTALKING_* is only partly set: payout alerts are log-only until both are set');
   if (!env.MPESA_CALLBACK_TOKEN) fatal.push('MPESA_CALLBACK_TOKEN is not set (every Daraja callback would be rejected)');

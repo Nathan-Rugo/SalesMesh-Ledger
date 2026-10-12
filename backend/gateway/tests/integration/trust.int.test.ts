@@ -273,6 +273,37 @@ describeDb('risk-adaptive escrow hold and trust scores (real Postgres)', () => {
     expect(await medianSettledAmount(db.pool, { agentId: agent, at: new Date(), excludeReceipt: 'NONE', days: 30 })).toEqual({ median: 100, count: 5 });
   });
 
+  it('CLAIMED (payout in flight) escrows count like HELD / RELEASED: maturity credit and median', async () => {
+    /** Moves the receipts' escrows to CLAIMED under one SENT payout of the agent. */
+    async function claim(agentId: string, receipts: string[]) {
+      const { rows: [d] } = await db.pool.query(
+        `INSERT INTO payout_destinations (agent_id, msisdn, status) VALUES ($1, '254700000001', 'ACTIVE') RETURNING destination_id`,
+        [agentId]
+      );
+      const payoutId = crypto.randomUUID();
+      await db.pool.query(
+        `INSERT INTO payouts (payout_id, agent_id, destination_id, msisdn, amount, gross_cents, carry_in_cents, carry_out_cents, disclosure_version, consent_hash, accepted_at)
+         VALUES ($1, $2, $3, '254700000001', 1, 100, 0, 0, '1', 'h', NOW())`,
+        [payoutId, agentId, d.destination_id]
+      );
+      await db.pool.query(
+        `UPDATE escrow_accounts e SET escrow_status = 'CLAIMED', payout_id = $1 FROM transactions t
+          WHERE t.transaction_id = e.transaction_id AND t.mpesa_receipt_id = ANY($2::text[])`,
+        [payoutId, receipts]
+      );
+    }
+    const credited = await seedAgent(db.pool, 'CLMAG');
+    const [r] = await seedHistory(credited, 1, false);
+    await claim(credited, [r]);
+    expect(await worker().creditMaturedHolds()).toBe(1);
+    expect((await trustEvents(credited)).map((e) => `${e.cause}:${e.ref}`)).toEqual([`HOLD_MATURED_CLEAN:${r}`]);
+
+    const median = await seedAgent(db.pool, 'CLMMD');
+    await seedHistory(median, 3, true, 100);
+    await claim(median, await seedHistory(median, 4, true, 300));
+    expect(await medianSettledAmount(db.pool, { agentId: median, at: new Date(), excludeReceipt: 'NONE', days: 30 })).toEqual({ median: 300, count: 7 });
+  });
+
   it('penalty: −0.15 once per security-hold event type and receipt (HELD, RELEASED, before or after settlement); operator undo', async () => {
     const agent = await seedAgent(db.pool, 'PENAG');
     mlStub(() => ({ decision: 'CLEAR' }));

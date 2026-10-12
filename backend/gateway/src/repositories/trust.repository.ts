@@ -53,7 +53,7 @@ export async function agentMaturity(db: Db, agentId: string): Promise<AgentMatur
 
 /**
  * The agent's median settled amount over (at − days, at], excluding this receipt, and how many there
- * were. Only payments that cleared count (escrow HELD or RELEASED, not security-held, no hold-type
+ * were. Only payments that cleared count (escrow HELD, CLAIMED or RELEASED, not security-held, no hold-type
  * event): large never-clearing self-payments cannot inflate the median.
  */
 export async function medianSettledAmount(
@@ -65,7 +65,7 @@ export async function medianSettledAmount(
        FROM transactions t JOIN escrow_accounts e USING (transaction_id)
       WHERE t.agent_id = $1 AND t.mpesa_receipt_id <> $3
         AND t.timestamp > $2::timestamptz - make_interval(secs => $4::float8 * 86400) AND t.timestamp <= $2::timestamptz
-        AND e.escrow_status IN ('HELD', 'RELEASED') AND NOT e.security_hold
+        AND e.escrow_status IN ('HELD', 'CLAIMED', 'RELEASED') AND NOT e.security_hold
         AND ${clean('t.mpesa_receipt_id', '$5')}`,
     [q.agentId, q.at.toISOString(), q.excludeReceipt, q.days, SECURITY_HOLD_EVENTS]
   );
@@ -187,7 +187,7 @@ export async function penaliseReceipt(db: Db, receipt: string, params: TrustPara
 /**
  * +β credit for evidence the money was legitimate: at most ONE credit per receipt across both kinds,
  * never for a receipt with a security-hold event, never a zero-delta credit (R = 1). Matured clean
- * holds also need an escrow decided under the trust regime (hold_seconds set), HELD or RELEASED,
+ * holds also need an escrow decided under the trust regime (hold_seconds set), HELD, CLAIMED or RELEASED,
  * whose release_due_at has passed, and count against maxCreditsPerDay per agent per (UTC) day;
  * statement confirmations are money-backed evidence and are exempt from the cap.
  * Returns the new rating, or null when nothing was credited.
@@ -204,7 +204,7 @@ export async function creditReceipt(db: Db, cause: CreditCause, receipt: string,
               (SELECT count(*) FROM agent_trust_events
                 WHERE agent_id = $5 AND cause = 'HOLD_MATURED_CLEAN' AND created_at >= date_trunc('day', NOW())) < $6
               AND EXISTS (SELECT 1 FROM escrow_accounts e JOIN transactions t USING (transaction_id)
-                           WHERE t.mpesa_receipt_id = $1 AND e.escrow_status IN ('HELD', 'RELEASED')
+                           WHERE t.mpesa_receipt_id = $1 AND e.escrow_status IN ('HELD', 'CLAIMED', 'RELEASED')
                              AND e.hold_seconds IS NOT NULL AND e.release_due_at <= NOW()))) AS ok`,
     [receipt, SECURITY_HOLD_EVENTS, CREDIT_CAUSES, cause, agentId, params.maxCreditsPerDay]
   );
@@ -213,7 +213,7 @@ export async function creditReceipt(db: Db, cause: CreditCause, receipt: string,
 }
 
 /**
- * Receipts whose escrow (decided under the trust regime, HELD or already RELEASED) has matured with
+ * Receipts whose escrow (decided under the trust regime, HELD, CLAIMED or RELEASED) has matured with
  * no security-hold event and no credit yet, for agents under today's maturity-credit cap whose
  * credit would still move the rating (an agent at R = 1 would otherwise be re-selected forever).
  */
@@ -221,7 +221,7 @@ export async function findMaturedHolds(db: Db, limit: number, params: TrustParam
   const { rows } = await db.query<{ receipt: string }>(
     `SELECT t.mpesa_receipt_id AS receipt
        FROM escrow_accounts e JOIN transactions t USING (transaction_id) JOIN sales_agents a ON a.agent_id = t.agent_id
-      WHERE e.escrow_status IN ('HELD', 'RELEASED') AND e.hold_seconds IS NOT NULL AND e.release_due_at <= NOW()
+      WHERE e.escrow_status IN ('HELD', 'CLAIMED', 'RELEASED') AND e.hold_seconds IS NOT NULL AND e.release_due_at <= NOW()
         AND round(a.agent_trust_rating + $5 * (1 - a.agent_trust_rating), 6) <> a.agent_trust_rating
         AND NOT EXISTS (SELECT 1 FROM agent_trust_events c WHERE c.cause = ANY($3::text[]) AND c.ref = t.mpesa_receipt_id)
         AND ${clean('t.mpesa_receipt_id', '$2')}

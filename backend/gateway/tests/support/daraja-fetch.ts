@@ -1,4 +1,4 @@
-/** Programmable Daraja stand-in for fetch (OAuth, STK Push and B2C endpoints). */
+/** Programmable Daraja stand-in for fetch (OAuth, STK Push, B2C and Transaction Status endpoints). */
 
 export interface FakeResponse {
   status: number;
@@ -37,8 +37,8 @@ export function b2cAccepted(over: Record<string, unknown> = {}): FakeResponse {
 }
 
 /** A B2C result callback body (ReceiverPartyPublicName in Daraja's "2547… - NAME" form). */
-export function b2cResultBody(originatorConversationId: string, o: { code?: number; name?: string | null; conversationId?: string } = {}) {
-  const params: any[] = [{ Key: 'TransactionAmount', Value: 1 }, { Key: 'TransactionReceipt', Value: 'NLJ41HAY6Q' }];
+export function b2cResultBody(originatorConversationId: string, o: { code?: number; name?: string | null; conversationId?: string; receipt?: string } = {}) {
+  const params: any[] = [{ Key: 'TransactionAmount', Value: 1 }, { Key: 'TransactionReceipt', Value: o.receipt ?? 'NLJ41HAY6Q' }];
   if (o.name !== null) params.push({ Key: 'ReceiverPartyPublicName', Value: o.name ?? '254712345678 - JOHN KAMAU' });
   return {
     Result: {
@@ -47,9 +47,31 @@ export function b2cResultBody(originatorConversationId: string, o: { code?: numb
       ResultDesc: o.code ? 'The service request failed.' : 'The service request is processed successfully.',
       OriginatorConversationID: originatorConversationId,
       ConversationID: o.conversationId ?? 'AG_20261012_1',
-      TransactionID: 'NLJ41HAY6Q',
+      TransactionID: o.receipt ?? 'NLJ41HAY6Q',
       ResultParameters: { ResultParameter: params },
       ReferenceData: { ReferenceItem: { Key: 'QueueTimeoutURL', Value: 'https://gw.example/api/v1/mpesa/b2c/timeout/tok' } },
+    },
+  };
+}
+
+/** A Transaction Status result callback body (answers the query whose OriginatorConversationID is `queryId`). */
+export function tsResultBody(queryId: string, o: { code?: number; status?: string; receipt?: string; name?: string } = {}) {
+  return {
+    Result: {
+      ResultType: 0,
+      ResultCode: o.code ?? 0,
+      ResultDesc: o.code ? 'The transaction could not be found.' : 'The service request is processed successfully.',
+      OriginatorConversationID: queryId,
+      ConversationID: 'AG_TS_1',
+      TransactionID: 'TSQUERY001',
+      ResultParameters: {
+        ResultParameter: [
+          { Key: 'ReceiptNo', Value: o.receipt ?? 'NLJ41HAY6Q' },
+          { Key: 'TransactionStatus', Value: o.status ?? 'Completed' },
+          { Key: 'Amount', Value: 1 },
+          { Key: 'CreditPartyName', Value: o.name ?? '254700000000 - TEST AGENT' },
+        ],
+      },
     },
   };
 }
@@ -57,9 +79,10 @@ export function b2cResultBody(originatorConversationId: string, o: { code?: numb
 export function darajaFetch(
   stk: StkHandler,
   oauth: () => FakeResponse | Error = () => ({ status: 200, body: { access_token: 'tok-1', expires_in: '3599' } }),
-  b2c: StkHandler = () => b2cAccepted()
+  b2c: StkHandler = () => b2cAccepted(),
+  ts: StkHandler = () => b2cAccepted()
 ) {
-  const calls = { oauth: 0, stk: 0, stkBodies: [] as any[], stkAuth: [] as string[], b2c: 0, b2cBodies: [] as any[] };
+  const calls = { oauth: 0, stk: 0, stkBodies: [] as any[], stkAuth: [] as string[], b2c: 0, b2cBodies: [] as any[], ts: 0, tsBodies: [] as any[] };
   const respond = (r: FakeResponse) => ({
     ok: r.status >= 200 && r.status < 300,
     status: r.status,
@@ -78,6 +101,10 @@ export function darajaFetch(
       calls.b2c += 1;
       calls.b2cBodies.push(body);
       r = await b2c(body, calls.b2c);
+    } else if (url.includes('/mpesa/transactionstatus/')) {
+      calls.ts += 1;
+      calls.tsBodies.push(body);
+      r = await ts(body, calls.ts);
     } else {
       calls.stk += 1;
       calls.stkBodies.push(body);
