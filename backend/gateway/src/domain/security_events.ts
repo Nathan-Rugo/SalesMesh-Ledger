@@ -20,7 +20,9 @@ export type SecurityEventType =
   | 'RECONCILED_CALLBACK_LATE'
   | 'RECONCILE_ATTRIBUTION_CONFLICT'
   | 'RECONCILE_NOT_ON_STATEMENT'
-  | 'STK_STATUS_CONFLICT';
+  | 'STK_STATUS_CONFLICT'
+  // Payout destinations (spec gh-11): registration, activation, rejection, cancellation, expiry
+  | 'PAYOUT_DESTINATION_CHANGED';
 
 /**
  * Receipt events that put the receipt's escrow on security hold (QUARANTINED, never self-healed),

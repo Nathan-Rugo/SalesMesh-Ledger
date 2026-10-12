@@ -1,6 +1,7 @@
 /**
  * @file client.ts
- * @description Safaricom Daraja client for M-Pesa Express (STK Push) — spec gh-5.
+ * @description Safaricom Daraja client for M-Pesa Express (STK Push) — spec gh-5 — and B2C
+ * BusinessPayment (payout-destination verification) — spec gh-11.
  *
  *  - OAuth token cached and refreshed 60 s before expiry; concurrent refreshes share one request
  *    (single flight); a failed token fetch is retried once (the token fetch only).
@@ -23,15 +24,20 @@
 
 import { darajaTotalTimeoutMs } from '../config/stk';
 import { formatDarajaTime } from '../domain/callback';
-import { errorCode as thrownErrorCode, isRecord, type JsonRecord } from '../domain/unknown';
+import { errorCode as thrownErrorCode, field, isRecord, type JsonRecord } from '../domain/unknown';
 import { metrics as defaultMetrics, type GatewayMetrics } from '../services/metrics.service';
 
 export type TransactionType = 'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline';
 
-export interface DarajaConfig {
+/** What the OAuth token cache needs (shared by the STK and B2C clients). */
+export interface DarajaAuthConfig {
   baseUrl: string;
   consumerKey: string;
   consumerSecret: string;
+  oauthTimeoutMs: number;
+}
+
+export interface DarajaConfig extends DarajaAuthConfig {
   /** BusinessShortCode (Paybill number, or the store/HO number for a till); also used in Password. */
   shortCode: string;
   passkey: string;
@@ -41,7 +47,6 @@ export interface DarajaConfig {
   callbackUrl: string;
   transactionDesc: string;
   timeoutMs: number;
-  oauthTimeoutMs: number;
   /** Overall budget of one stkPush(), bounding every sub-call. */
   totalTimeoutMs: number;
 }
@@ -162,17 +167,18 @@ type FetchLike = (url: string, init?: RequestInit) => Promise<{ ok: boolean; sta
 
 const safe = (v: unknown, max = 200): string => String(v ?? '').replace(/\d{9,}/g, '[digits]').slice(0, max);
 
-export class DarajaClient {
+/** The OAuth token cache (single flight, early refresh) shared by the STK and B2C clients. */
+class DarajaAuth<C extends DarajaAuthConfig> {
   private token: { value: string; expiresAt: number } | null = null;
   private inflight: Promise<string> | null = null;
 
   constructor(
-    private readonly configSource: DarajaConfig | (() => DarajaConfig) = () => darajaConfig(),
-    private readonly fetchImpl: FetchLike = (url, init) => fetch(url, init),
-    private readonly metrics: GatewayMetrics = defaultMetrics
+    private readonly configSource: C | (() => C),
+    protected readonly fetchImpl: FetchLike = (url, init) => fetch(url, init),
+    protected readonly metrics: GatewayMetrics = defaultMetrics
   ) {}
 
-  private config(): DarajaConfig {
+  protected config(): C {
     return typeof this.configSource === 'function' ? this.configSource() : this.configSource;
   }
 
@@ -238,6 +244,16 @@ export class DarajaClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+}
+
+export class DarajaClient extends DarajaAuth<DarajaConfig> {
+  constructor(
+    configSource: DarajaConfig | (() => DarajaConfig) = () => darajaConfig(),
+    fetchImpl?: FetchLike,
+    metrics?: GatewayMetrics
+  ) {
+    super(configSource, fetchImpl, metrics);
   }
 
   /** Sends one STK Push. Never throws; never retries except after an invalid-token answer. */
@@ -529,5 +545,234 @@ export function mapStkResponse(status: number, raw: unknown): Mapped {
   if (status >= 400 && status < 500) return { kind: 'REJECTED', code: `http_${status}`, message: 'rejected by Daraja' };
   return { kind: 'UNKNOWN', code: `http_${status}`, message: 'no definitive answer from Daraja' };
 }
+
+// ── B2C (payout-destination verification, spec gh-11) ──────────────────────
+
+export interface B2cConfig extends DarajaAuthConfig {
+  /** The B2C (disbursement) shortcode: PartyA. */
+  shortCode: string;
+  initiatorName: string;
+  /** The initiator password, encrypted offline with Safaricom's certificate. Never logged. */
+  securityCredential: string;
+  resultUrl: string;
+  timeoutUrl: string;
+  timeoutMs: number;
+  totalTimeoutMs: number;
+}
+
+/** An https URL ending in /api/v1/mpesa/<suffix>/<MPESA_CALLBACK_TOKEN>, or a DarajaConfigError. */
+function tokenUrl(env: NodeJS.ProcessEnv, name: string, suffix: string): string {
+  const url = env[name]!.trim();
+  if (!/^https:\/\/[^\s]+$/.test(url)) throw new DarajaConfigError(`${name} must be an https:// URL`);
+  if (url.includes('${')) throw new DarajaConfigError(`${name} contains an unexpanded \${...}: paste the literal MPESA_CALLBACK_TOKEN value`);
+  let path: string;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    throw new DarajaConfigError(`${name} is not a valid URL`);
+  }
+  if (!path.endsWith(`/api/v1/mpesa/${suffix}/${env.MPESA_CALLBACK_TOKEN!.trim()}`)) {
+    throw new DarajaConfigError(`${name} must end with /api/v1/mpesa/${suffix}/<MPESA_CALLBACK_TOKEN>`);
+  }
+  return url;
+}
+
+/** Reads and validates the B2C settings (required when PAYOUTS_ENABLED=true); throws DarajaConfigError. */
+export function b2cConfig(env: NodeJS.ProcessEnv = process.env): B2cConfig {
+  const missing = [
+    'DARAJA_CONSUMER_KEY',
+    'DARAJA_CONSUMER_SECRET',
+    'DARAJA_B2C_SHORTCODE',
+    'DARAJA_B2C_INITIATOR_NAME',
+    'DARAJA_B2C_SECURITY_CREDENTIAL',
+    'DARAJA_B2C_RESULT_URL',
+    'DARAJA_B2C_TIMEOUT_URL',
+    'MPESA_CALLBACK_TOKEN',
+  ].filter((k) => !env[k]?.trim());
+  if (missing.length) throw new DarajaConfigError(`missing ${missing.join(', ')}`);
+  const baseUrl = BASE_URLS[(env.DARAJA_ENVIRONMENT ?? 'sandbox').trim().toLowerCase()];
+  if (!baseUrl) throw new DarajaConfigError('DARAJA_ENVIRONMENT must be sandbox or production');
+  const shortCode = env.DARAJA_B2C_SHORTCODE!.trim();
+  if (!/^\d{5,7}$/.test(shortCode)) throw new DarajaConfigError('DARAJA_B2C_SHORTCODE must be a 5-7 digit number');
+  return {
+    baseUrl,
+    consumerKey: env.DARAJA_CONSUMER_KEY!.trim(),
+    consumerSecret: env.DARAJA_CONSUMER_SECRET!.trim(),
+    shortCode,
+    initiatorName: env.DARAJA_B2C_INITIATOR_NAME!.trim(),
+    securityCredential: env.DARAJA_B2C_SECURITY_CREDENTIAL!.trim(),
+    resultUrl: tokenUrl(env, 'DARAJA_B2C_RESULT_URL', 'b2c/result'),
+    timeoutUrl: tokenUrl(env, 'DARAJA_B2C_TIMEOUT_URL', 'b2c/timeout'),
+    timeoutMs: Math.min(posInt(env.DARAJA_TIMEOUT_MS, 10_000), 60_000),
+    oauthTimeoutMs: Math.min(posInt(env.DARAJA_OAUTH_TIMEOUT_MS, 5_000), 30_000),
+    totalTimeoutMs: darajaTotalTimeoutMs(env),
+  };
+}
+
+export interface B2cPaymentRequest {
+  /** Recorded before the call (the payout_destinations row id); the result is matched on it. */
+  originatorConversationId: string;
+  /** 2547XXXXXXXX / 2541XXXXXXXX. */
+  phone: string;
+  /** Whole shillings. */
+  amount: number;
+  remarks: string;
+}
+
+export type B2cOutcome =
+  | { kind: 'ACCEPTED'; conversationId: string }
+  | { kind: 'REJECTED'; code: string; message: string }
+  | { kind: 'UNKNOWN'; code: string; message: string };
+
+type B2cMapped = B2cOutcome | { kind: 'TOKEN_INVALID'; code: string };
+
+/** Maps one synchronous B2C answer (status + parsed JSON or null); same errorCode table as STK. */
+export function mapB2cResponse(status: number, raw: unknown): B2cMapped {
+  const body: JsonRecord = isRecord(raw) ? raw : {};
+  const errorCode = typeof body.errorCode === 'string' ? body.errorCode.trim() : '';
+  if (errorCode) {
+    const rule = DARAJA_ERROR_OUTCOMES[errorCode];
+    if (rule === 'TOKEN') return { kind: 'TOKEN_INVALID', code: errorCode };
+    const kind = rule ?? (status >= 400 && status < 500 ? 'REJECTED' : 'UNKNOWN');
+    return { kind, code: errorCode, message: safe(body.errorMessage) || 'Daraja error' };
+  }
+  if (status === 401) return { kind: 'TOKEN_INVALID', code: 'http_401' };
+  if (status >= 200 && status < 300 && isRecord(raw) && body.ResponseCode !== undefined) {
+    const responseCode = String(body.ResponseCode).trim();
+    if (responseCode !== '0') return { kind: 'REJECTED', code: responseCode.slice(0, 20), message: safe(body.ResponseDescription) || 'rejected by Daraja' };
+    const conversationId = typeof body.ConversationID === 'string' ? body.ConversationID.trim() : '';
+    if (!conversationId || conversationId.length > 100) return { kind: 'UNKNOWN', code: 'missing_conversation_id', message: 'accepted without a ConversationID' };
+    return { kind: 'ACCEPTED', conversationId };
+  }
+  if (status >= 400 && status < 500) return { kind: 'REJECTED', code: `http_${status}`, message: 'rejected by Daraja' };
+  return { kind: 'UNKNOWN', code: `http_${status}`, message: 'no definitive answer from Daraja' };
+}
+
+export class B2cClient extends DarajaAuth<B2cConfig> {
+  constructor(configSource: B2cConfig | (() => B2cConfig) = () => b2cConfig(), fetchImpl?: FetchLike, metrics?: GatewayMetrics) {
+    super(configSource, fetchImpl, metrics);
+  }
+
+  /**
+   * One B2C BusinessPayment. Never throws; never resent blindly (a resend could pay twice). The one
+   * exception, as for STK: Daraja reported the token invalid, so the request was not processed.
+   */
+  async b2cPayment(req: B2cPaymentRequest): Promise<B2cOutcome> {
+    let cfg: B2cConfig;
+    try {
+      cfg = this.config();
+    } catch (error) {
+      return { kind: 'REJECTED', code: 'config', message: (error as Error).message };
+    }
+    const deadline = Date.now() + cfg.totalTimeoutMs;
+    let token: string;
+    try {
+      token = await this.accessToken(false, deadline);
+    } catch (error) {
+      console.error('[Daraja] no OAuth token, B2C not sent:', (error as Error).message);
+      return { kind: 'REJECTED', code: 'oauth_unavailable', message: 'Daraja authentication failed' };
+    }
+    for (let attempt = 0; ; attempt++) {
+      const budget = Math.min(cfg.timeoutMs, deadline - Date.now());
+      if (budget <= 0) return { kind: 'REJECTED', code: 'deadline', message: 'Daraja did not answer in time' };
+      const mapped = await this.postB2c(cfg, token, req, budget);
+      if (mapped.kind !== 'TOKEN_INVALID') {
+        console.info(`[Daraja] B2C ${mapped.kind}${mapped.kind === 'ACCEPTED' ? '' : ` (${mapped.code})`}`);
+        return mapped;
+      }
+      if (attempt > 0) return { kind: 'REJECTED', code: mapped.code, message: 'Daraja rejected the access token' };
+      this.invalidateToken();
+      try {
+        token = await this.accessToken(true, deadline);
+      } catch (error) {
+        console.error('[Daraja] OAuth refresh failed, B2C not sent:', (error as Error).message);
+        return { kind: 'REJECTED', code: 'oauth_unavailable', message: 'Daraja authentication failed' };
+      }
+    }
+  }
+
+  private async postB2c(cfg: B2cConfig, token: string, req: B2cPaymentRequest, timeoutMs: number): Promise<B2cMapped> {
+    const body = {
+      OriginatorConversationID: req.originatorConversationId,
+      InitiatorName: cfg.initiatorName,
+      SecurityCredential: cfg.securityCredential,
+      CommandID: 'BusinessPayment',
+      Amount: req.amount,
+      PartyA: Number(cfg.shortCode),
+      PartyB: Number(req.phone),
+      Remarks: req.remarks.slice(0, 100),
+      QueueTimeOutURL: cfg.timeoutUrl,
+      ResultURL: cfg.resultUrl,
+      Occasion: '',
+    };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const started = Date.now();
+    try {
+      let res: Awaited<ReturnType<FetchLike>>;
+      try {
+        res = await this.fetchImpl(`${cfg.baseUrl}/mpesa/b2c/v3/paymentrequest`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (controller.signal.aborted) return { kind: 'UNKNOWN', code: 'timeout', message: 'no answer from Daraja in time' };
+        const code = thrownErrorCode(error);
+        if (NOT_SENT_CODES.has(code)) return { kind: 'REJECTED', code: `network_${code}`, message: 'Daraja unreachable' };
+        return { kind: 'UNKNOWN', code: code ? `network_${code}` : 'network_error', message: 'connection to Daraja lost' };
+      }
+      let text: string;
+      try {
+        text = await res.text();
+      } catch {
+        return { kind: 'UNKNOWN', code: controller.signal.aborted ? 'timeout' : 'body_lost', message: 'Daraja response lost' };
+      }
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = null;
+      }
+      return mapB2cResponse(res.status, parsed);
+    } finally {
+      clearTimeout(timer);
+      this.metrics.recordDarajaLatency(Date.now() - started);
+    }
+  }
+}
+
+export interface B2cResult {
+  originatorConversationId: string;
+  conversationId: string | null;
+  /** Result.ResultCode as a string ("0" = paid). */
+  resultCode: string;
+  /** ReceiverPartyPublicName without its "2547… - " prefix, or null. Never logged. */
+  receiverName: string | null;
+}
+
+/** Parses a B2C result callback body ({Result: {...}}); null when it is not one. */
+export function parseB2cResult(body: unknown): B2cResult | null {
+  const r = field(body, 'Result');
+  if (!isRecord(r)) return null;
+  const originatorConversationId = typeof r.OriginatorConversationID === 'string' ? r.OriginatorConversationID.trim() : '';
+  if (!originatorConversationId || r.ResultCode === undefined || r.ResultCode === null) return null;
+  const items = field(r, 'ResultParameters', 'ResultParameter');
+  const list: unknown[] = Array.isArray(items) ? items : isRecord(items) ? [items] : [];
+  const named = list.find((i) => isRecord(i) && i.Key === 'ReceiverPartyPublicName');
+  const raw = isRecord(named) && typeof named.Value === 'string' ? named.Value : '';
+  const sep = raw.indexOf(' - ');
+  // No " - ": a leading phone ("254712345678 JOHN", "254712345678-JOHN") is still not the name.
+  const receiverName = (sep >= 0 ? raw.slice(sep + 3) : (/^\d{9,12}\s*-?\s*(.*)$/.exec(raw.trim())?.[1] ?? raw)).trim() || null;
+  return {
+    originatorConversationId,
+    conversationId: typeof r.ConversationID === 'string' && r.ConversationID.trim() ? r.ConversationID.trim().slice(0, 100) : null,
+    resultCode: String(r.ResultCode).trim().slice(0, 20),
+    receiverName,
+  };
+}
+
+export const b2cClient = new B2cClient();
 
 export const darajaClient = new DarajaClient();
