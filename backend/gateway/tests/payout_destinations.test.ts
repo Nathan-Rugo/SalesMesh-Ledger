@@ -538,7 +538,7 @@ describe('B2C mapping', () => {
   });
 
   it('parseB2cResult reads ResultCode, ids and the name after " - "; non-results → null', () => {
-    expect(parseB2cResult(b2cResultBody('id-1'))).toEqual({ originatorConversationId: 'id-1', conversationId: 'AG_20261012_1', resultCode: '0', receiverName: 'JOHN KAMAU' });
+    expect(parseB2cResult(b2cResultBody('id-1'))).toEqual({ originatorConversationId: 'id-1', conversationId: 'AG_20261012_1', resultCode: '0', receiverName: 'JOHN KAMAU', receipt: 'NLJ41HAY6Q' });
     expect(parseB2cResult(b2cResultBody('id-1', { code: 2001, name: null }))).toMatchObject({ resultCode: '2001', receiverName: null });
     expect(parseB2cResult({ Result: { ResultCode: 0, OriginatorConversationID: 'x', ResultParameters: { ResultParameter: { Key: 'ReceiverPartyPublicName', Value: 'JANE' } } } })!.receiverName).toBe('JANE');
     const named = (v: string) => parseB2cResult({ Result: { ResultCode: 0, OriginatorConversationID: 'x', ResultParameters: { ResultParameter: [{ Key: 'ReceiverPartyPublicName', Value: v }] } } })!.receiverName;
@@ -615,7 +615,7 @@ describe('B2C callback routes', () => {
 describe('worker sweep hook', () => {
   it('the settlement worker housekeeping runs the payout sweep only while PAYOUTS_ENABLED=true', async () => {
     const sweep = jest.fn(async () => ({ promoted: 0, expired: 0 }));
-    const w = new SettlementWorker({ pool: fakeDb, spool: null, payouts: { sweep } });
+    const w = new SettlementWorker({ pool: fakeDb, spool: null, payouts: { sweep }, payoutClaims: { sweep: jest.fn(async () => ({ queried: 0, unresolved: 0 })) } });
     process.env.PAYOUTS_ENABLED = 'false';
     await w.housekeeping(true);
     expect(sweep).not.toHaveBeenCalled();

@@ -1,7 +1,8 @@
 /**
  * @file client.ts
  * @description Safaricom Daraja client for M-Pesa Express (STK Push) — spec gh-5 — and B2C
- * BusinessPayment (payout-destination verification) — spec gh-11.
+ * BusinessPayment (payout-destination verification and agent payouts) plus Transaction Status
+ * (lost payout results) — spec gh-11.
  *
  *  - OAuth token cached and refreshed 60 s before expiry; concurrent refreshes share one request
  *    (single flight); a failed token fetch is retried once (the token fetch only).
@@ -610,7 +611,7 @@ export function b2cConfig(env: NodeJS.ProcessEnv = process.env): B2cConfig {
 }
 
 export interface B2cPaymentRequest {
-  /** Recorded before the call (the payout_destinations row id); the result is matched on it. */
+  /** Recorded before the call (the payout_destinations or payouts row id); the result is matched on it. */
   originatorConversationId: string;
   /** 2547XXXXXXXX / 2541XXXXXXXX. */
   phone: string;
@@ -658,41 +659,7 @@ export class B2cClient extends DarajaAuth<B2cConfig> {
    * exception, as for STK: Daraja reported the token invalid, so the request was not processed.
    */
   async b2cPayment(req: B2cPaymentRequest): Promise<B2cOutcome> {
-    let cfg: B2cConfig;
-    try {
-      cfg = this.config();
-    } catch (error) {
-      return { kind: 'REJECTED', code: 'config', message: (error as Error).message };
-    }
-    const deadline = Date.now() + cfg.totalTimeoutMs;
-    let token: string;
-    try {
-      token = await this.accessToken(false, deadline);
-    } catch (error) {
-      console.error('[Daraja] no OAuth token, B2C not sent:', (error as Error).message);
-      return { kind: 'REJECTED', code: 'oauth_unavailable', message: 'Daraja authentication failed' };
-    }
-    for (let attempt = 0; ; attempt++) {
-      const budget = Math.min(cfg.timeoutMs, deadline - Date.now());
-      if (budget <= 0) return { kind: 'REJECTED', code: 'deadline', message: 'Daraja did not answer in time' };
-      const mapped = await this.postB2c(cfg, token, req, budget);
-      if (mapped.kind !== 'TOKEN_INVALID') {
-        console.info(`[Daraja] B2C ${mapped.kind}${mapped.kind === 'ACCEPTED' ? '' : ` (${mapped.code})`}`);
-        return mapped;
-      }
-      if (attempt > 0) return { kind: 'REJECTED', code: mapped.code, message: 'Daraja rejected the access token' };
-      this.invalidateToken();
-      try {
-        token = await this.accessToken(true, deadline);
-      } catch (error) {
-        console.error('[Daraja] OAuth refresh failed, B2C not sent:', (error as Error).message);
-        return { kind: 'REJECTED', code: 'oauth_unavailable', message: 'Daraja authentication failed' };
-      }
-    }
-  }
-
-  private async postB2c(cfg: B2cConfig, token: string, req: B2cPaymentRequest, timeoutMs: number): Promise<B2cMapped> {
-    const body = {
+    return this.send('B2C', '/mpesa/b2c/v3/paymentrequest', (cfg) => ({
       OriginatorConversationID: req.originatorConversationId,
       InitiatorName: cfg.initiatorName,
       SecurityCredential: cfg.securityCredential,
@@ -704,14 +671,72 @@ export class B2cClient extends DarajaAuth<B2cConfig> {
       QueueTimeOutURL: cfg.timeoutUrl,
       ResultURL: cfg.resultUrl,
       Occasion: '',
-    };
+    }));
+  }
+
+  /**
+   * Transaction Status of an earlier B2C payment, looked up by its OriginatorConversationID (sent as
+   * OriginalConversationID). `queryId` is this query's own OriginatorConversationID: the answer
+   * arrives asynchronously on the same ResultURL. A query never pays, so it is safe to repeat.
+   */
+  async transactionStatus(req: { originatorConversationId: string; queryId: string }): Promise<B2cOutcome> {
+    return this.send('Transaction Status', '/mpesa/transactionstatus/v1/query', (cfg) => ({
+      OriginatorConversationID: req.queryId,
+      Initiator: cfg.initiatorName,
+      SecurityCredential: cfg.securityCredential,
+      CommandID: 'TransactionStatusQuery',
+      OriginalConversationID: req.originatorConversationId,
+      PartyA: Number(cfg.shortCode),
+      IdentifierType: 4,
+      ResultURL: cfg.resultUrl,
+      QueueTimeOutURL: cfg.timeoutUrl,
+      Remarks: 'SalesMesh payout status',
+      Occasion: '',
+    }));
+  }
+
+  private async send(label: string, path: string, body: (cfg: B2cConfig) => Record<string, unknown>): Promise<B2cOutcome> {
+    let cfg: B2cConfig;
+    try {
+      cfg = this.config();
+    } catch (error) {
+      return { kind: 'REJECTED', code: 'config', message: (error as Error).message };
+    }
+    const deadline = Date.now() + cfg.totalTimeoutMs;
+    let token: string;
+    try {
+      token = await this.accessToken(false, deadline);
+    } catch (error) {
+      console.error(`[Daraja] no OAuth token, ${label} not sent:`, (error as Error).message);
+      return { kind: 'REJECTED', code: 'oauth_unavailable', message: 'Daraja authentication failed' };
+    }
+    for (let attempt = 0; ; attempt++) {
+      const budget = Math.min(cfg.timeoutMs, deadline - Date.now());
+      if (budget <= 0) return { kind: 'REJECTED', code: 'deadline', message: 'Daraja did not answer in time' };
+      const mapped = await this.post(cfg, token, path, body(cfg), budget);
+      if (mapped.kind !== 'TOKEN_INVALID') {
+        console.info(`[Daraja] ${label} ${mapped.kind}${mapped.kind === 'ACCEPTED' ? '' : ` (${mapped.code})`}`);
+        return mapped;
+      }
+      if (attempt > 0) return { kind: 'REJECTED', code: mapped.code, message: 'Daraja rejected the access token' };
+      this.invalidateToken();
+      try {
+        token = await this.accessToken(true, deadline);
+      } catch (error) {
+        console.error(`[Daraja] OAuth refresh failed, ${label} not sent:`, (error as Error).message);
+        return { kind: 'REJECTED', code: 'oauth_unavailable', message: 'Daraja authentication failed' };
+      }
+    }
+  }
+
+  private async post(cfg: B2cConfig, token: string, path: string, body: Record<string, unknown>, timeoutMs: number): Promise<B2cMapped> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const started = Date.now();
     try {
       let res: Awaited<ReturnType<FetchLike>>;
       try {
-        res = await this.fetchImpl(`${cfg.baseUrl}/mpesa/b2c/v3/paymentrequest`, {
+        res = await this.fetchImpl(`${cfg.baseUrl}${path}`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -750,7 +775,29 @@ export interface B2cResult {
   resultCode: string;
   /** ReceiverPartyPublicName without its "2547… - " prefix, or null. Never logged. */
   receiverName: string | null;
+  /** The M-Pesa receipt (TransactionReceipt, else TransactionID), or null. */
+  receipt: string | null;
 }
+
+/** The ResultParameters list of a Result body (Daraja sends one item as an object). */
+function resultParams(r: JsonRecord): unknown[] {
+  const items = field(r, 'ResultParameters', 'ResultParameter');
+  return Array.isArray(items) ? items : isRecord(items) ? [items] : [];
+}
+
+function paramValue(list: unknown[], key: string): unknown {
+  const item = list.find((i) => isRecord(i) && i.Key === key);
+  return isRecord(item) ? item.Value : undefined;
+}
+
+/** "2547… - FIRST LAST" → "FIRST LAST"; a leading phone without " - " is still not the name. */
+function partyName(raw: unknown): string | null {
+  const v = typeof raw === 'string' ? raw : '';
+  const sep = v.indexOf(' - ');
+  return (sep >= 0 ? v.slice(sep + 3) : (/^\d{9,12}\s*-?\s*(.*)$/.exec(v.trim())?.[1] ?? v)).trim() || null;
+}
+
+const receiptOf = (v: unknown): string | null => (typeof v === 'string' && /^[A-Z0-9]{6,30}$/i.test(v.trim()) ? v.trim().toUpperCase() : null);
 
 /** Parses a B2C result callback body ({Result: {...}}); null when it is not one. */
 export function parseB2cResult(body: unknown): B2cResult | null {
@@ -758,18 +805,48 @@ export function parseB2cResult(body: unknown): B2cResult | null {
   if (!isRecord(r)) return null;
   const originatorConversationId = typeof r.OriginatorConversationID === 'string' ? r.OriginatorConversationID.trim() : '';
   if (!originatorConversationId || r.ResultCode === undefined || r.ResultCode === null) return null;
-  const items = field(r, 'ResultParameters', 'ResultParameter');
-  const list: unknown[] = Array.isArray(items) ? items : isRecord(items) ? [items] : [];
-  const named = list.find((i) => isRecord(i) && i.Key === 'ReceiverPartyPublicName');
-  const raw = isRecord(named) && typeof named.Value === 'string' ? named.Value : '';
-  const sep = raw.indexOf(' - ');
-  // No " - ": a leading phone ("254712345678 JOHN", "254712345678-JOHN") is still not the name.
-  const receiverName = (sep >= 0 ? raw.slice(sep + 3) : (/^\d{9,12}\s*-?\s*(.*)$/.exec(raw.trim())?.[1] ?? raw)).trim() || null;
+  const list = resultParams(r);
   return {
     originatorConversationId,
     conversationId: typeof r.ConversationID === 'string' && r.ConversationID.trim() ? r.ConversationID.trim().slice(0, 100) : null,
     resultCode: String(r.ResultCode).trim().slice(0, 20),
-    receiverName,
+    receiverName: partyName(paramValue(list, 'ReceiverPartyPublicName')),
+    receipt: receiptOf(paramValue(list, 'TransactionReceipt')) ?? receiptOf(r.TransactionID),
+  };
+}
+
+export interface TransactionStatusResult {
+  /** This query's OriginatorConversationID (one of payouts.status_query_ids). */
+  queryId: string;
+  resultCode: string;
+  /** PAID: ResultCode 0 and TransactionStatus Completed; FAILED: Failed / Declined / Cancelled; else PENDING. */
+  outcome: 'PAID' | 'FAILED' | 'PENDING';
+  /** TransactionStatus as reported (evidence; never PII). */
+  transactionStatus: string;
+  receipt: string | null;
+  /** CreditPartyName without its phone prefix, or null. Never logged. */
+  receiverName: string | null;
+}
+
+/** Parses a Transaction Status result callback body ({Result: {...}}); null when it is not one. */
+export function parseTransactionStatusResult(body: unknown): TransactionStatusResult | null {
+  const r = field(body, 'Result');
+  if (!isRecord(r)) return null;
+  const queryId = typeof r.OriginatorConversationID === 'string' ? r.OriginatorConversationID.trim() : '';
+  if (!queryId || r.ResultCode === undefined || r.ResultCode === null) return null;
+  const list = resultParams(r);
+  const resultCode = String(r.ResultCode).trim().slice(0, 20);
+  const status = String(paramValue(list, 'TransactionStatus') ?? '').trim();
+  // Anything short of an explicit final status is retried (and ends UNRESOLVED), never FAILED.
+  const outcome = resultCode !== '0' ? 'PENDING' : /^completed$/i.test(status) ? 'PAID' : /^(failed|declined|cancelled)$/i.test(status) ? 'FAILED' : 'PENDING';
+  return {
+    queryId,
+    resultCode,
+    outcome,
+    transactionStatus: safe(status, 40),
+    // ReceiptNo only: a Transaction Status result's TransactionID is the query's own.
+    receipt: receiptOf(paramValue(list, 'ReceiptNo')),
+    receiverName: partyName(paramValue(list, 'CreditPartyName')),
   };
 }
 
