@@ -1,0 +1,176 @@
+/* SalesMesh design tokens (Design_Inspo.md). Semantic colours resolve through --sm-* variables so
+   the same utilities render the light "daylight" agent shell and the dark "cockpit" admin shell.
+   Every text pairing below is >= 7:1 (WCAG AAA). */
+
+:root {
+  --sm-canvas: #f8fafc; /* Slate 50 */
+  --sm-surface: #ffffff;
+  --sm-inset: #f1f5f9; /* Slate 100 — no muted text on it (6.9:1) */
+  --sm-line: #e2e8f0; /* Slate 200 */
+  --sm-ink: #0f172a; /* 17:1 */
+  --sm-ink-muted: #475569; /* Slate 600: 7.2:1 on Slate 50, 7.6:1 on white */
+  --sm-accent: #075985; /* Sky 800 — Sky 700 #0369A1 is 5.9:1, below AAA for text */
+  --sm-accent-hover: #0c4a6e;
+  --sm-on-accent: #ffffff;
+  --sm-link: #075985;
+  --sm-ring: #0369a1;
+  --sm-danger: #9f1239; /* Rose 800: 8.0:1 */
+  --sm-danger-soft: #fff1f2;
+  color-scheme: light;
+}
+
+[data-shell='admin'] {
+  --sm-canvas: #090d16; /* Obsidian Slate */
+  --sm-surface: #111827; /* Card Dark */
+  --sm-inset: #0f1522;
+  --sm-line: #1e293b;
+  --sm-ink: #e2e8f0; /* 15.8:1 */
+  --sm-ink-muted: #94a3b8; /* Slate 400 — only on #090D16 (7.6:1); cards switch to Slate 300 */
+  --sm-accent: #7dd3fc;
+  --sm-accent-hover: #bae6fd;
+  --sm-on-accent: #090d16;
+  --sm-link: #7dd3fc;
+  --sm-ring: #7dd3fc;
+  --sm-danger: #fda4af;
+  --sm-danger-soft: #2a1118;
+  color-scheme: dark;
+}
+[data-shell='admin'] .sm-surface {
+  --sm-ink-muted: #cbd5e1; /* Slate 300: 12:1 on #111827 */
+}
+
+@theme inline {
+  --font-sans: var(--font-jakarta), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, 'SFMono-Regular', Menlo, monospace;
+
+  --color-canvas: var(--sm-canvas);
+  --color-surface: var(--sm-surface);
+  --color-inset: var(--sm-inset);
+  --color-line: var(--sm-line);
+  --color-ink: var(--sm-ink);
+  --color-ink-muted: var(--sm-ink-muted);
+  --color-accent: var(--sm-accent);
+  --color-accent-hover: var(--sm-accent-hover);
+  --color-on-accent: var(--sm-on-accent);
+  --color-link: var(--sm-link);
+  --color-ring: var(--sm-ring);
+  --color-danger: var(--sm-danger);
+  --color-danger-soft: var(--sm-danger-soft);
+}
+
+@theme {
+  /* Brand & Kenyan payment rails */
+  --color-sovereign: #0369a1;
+  --color-sovereign-hover: #0284c7;
+  --color-mpesa: #00a859;
+  --color-mpesa-ink: #065f46;
+  --color-mpesa-soft: #ecfdf5;
+  --color-obsidian: #090d16;
+  --color-card-dark: #111827;
+
+  /* Semantic escrow lifecycle tokens — exactly as Design_Inspo. `*-ink` is the AAA label colour
+     used for pill text; the token text colour itself marks the status dot. */
+  --color-escrow-clear: #059669;
+  --color-escrow-clear-bg: #ecfdf5;
+  --color-escrow-clear-border: #a7f3d0;
+  --color-escrow-clear-ink: #065f46;
+  --color-escrow-hold: #d97706;
+  --color-escrow-hold-bg: #fffbeb;
+  --color-escrow-hold-border: #fde68a;
+  --color-escrow-hold-ink: #78350f;
+  --color-escrow-quarantined: #e11d48;
+  --color-escrow-quarantined-bg: #fff1f2;
+  --color-escrow-quarantined-border: #fecdd3;
+  --color-escrow-quarantined-ink: #9f1239;
+  --color-escrow-canary: #7c3aed;
+  --color-escrow-canary-bg: #f5f3ff;
+  --color-escrow-canary-border: #ddd6fe;
+  --color-escrow-canary-ink: #5b21b6;
+  --color-escrow-remitted: #6366f1;
+  --color-escrow-remitted-bg: #eef2ff;
+  --color-escrow-remitted-border: #c7d2fe;
+  --color-escrow-remitted-ink: #3730a3;
+
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --animate-roll-in: sm-roll-in 520ms var(--ease-out-quint) both;
+  --animate-rail: sm-rail 3.6s var(--ease-out-quint) infinite;
+  --animate-fade-up: sm-fade-up 420ms var(--ease-out-quint) both;
+}
+
+@keyframes sm-roll-in {
+  from {
+    transform: translateY(0.6em);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@keyframes sm-rail {
+  0% {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  70% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+}
+@keyframes sm-fade-up {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    background: var(--sm-canvas);
+    color: var(--sm-ink);
+    font-family: var(--font-sans);
+    font-feature-settings: 'ss01', 'cv11';
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible {
+    outline: 3px solid var(--sm-ring);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+}
+
+@utility press {
+  transition: transform 260ms var(--ease-spring), background-color 160ms ease, box-shadow 160ms ease;
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+    transition-duration: 90ms;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
