@@ -19,6 +19,8 @@ export interface RequestOptions {
   /** Attach `Authorization: Bearer`. Defaults to true. */
   readonly auth?: boolean;
   readonly signal?: AbortSignal;
+  /** Non-2xx statuses returned as data (raw body) for the caller to interpret, e.g. payout 409/502/503 codes. */
+  readonly accept?: readonly number[];
 }
 
 export type HttpErrorListener = (error: AppError, path: string) => void;
@@ -29,8 +31,12 @@ const AUTH_PREFIX = '/api/v1/auth/';
  * /auth/pin is a Bearer route: a 401 that is NOT invalid_credentials means the access token was
  * rejected by the auth middleware before any PIN check (no lockout attempt spent), so it may refresh.
  */
-const isExpiredTokenOnPin = (path: string, body: unknown): boolean =>
-  path === '/api/v1/auth/pin' && errorCode(body) !== 'invalid_credentials';
+/**
+ * A Bearer 401 worth one refresh + retry: an expired token, never a wrong PIN (invalid_credentials),
+ * which would spend a second lockout attempt (e.g. a payout claim's PIN).
+ */
+const isExpiredToken = (path: string, isAuthRoute: boolean, body: unknown): boolean =>
+  errorCode(body) !== 'invalid_credentials' && (!isAuthRoute || path === '/api/v1/auth/pin');
 
 const PIN_REASONS: readonly PinErrorReason[] = ['pin_format', 'pin_repeated', 'pin_sequence', 'pin_common', 'pin_unchanged', 'current_pin_missing'];
 
@@ -60,7 +66,7 @@ export class HttpClient {
     const useBearer = opts.auth ?? true;
 
     let res = await this.send(path, opts, useBearer ? this.tokens?.currentAccessToken() ?? null : null);
-    if (res.ok && res.value.status === 401 && useBearer && this.tokens && (!isAuthRoute || isExpiredTokenOnPin(path, res.value.body))) {
+    if (res.ok && res.value.status === 401 && useBearer && this.tokens && isExpiredToken(path, isAuthRoute, res.value.body)) {
       const refreshed = await this.tokens.refreshAccessToken();
       if (!refreshed.ok) return this.fail(path, isAuthRoute, refreshed.error);
       res = await this.send(path, opts, refreshed.value);
@@ -68,7 +74,7 @@ export class HttpClient {
     if (!res.ok) return this.fail(path, isAuthRoute, res.error);
 
     const { status, headers, body } = res.value;
-    if (status >= 200 && status < 300) return ok({ status, data: body as T });
+    if ((status >= 200 && status < 300) || opts.accept?.includes(status)) return ok({ status, data: body as T });
     return this.fail(path, isAuthRoute, toAppError(status, body, headers.get('Retry-After')));
   }
 
@@ -110,7 +116,7 @@ export class HttpClient {
   }
 }
 
-const errorCode = (body: unknown): string | undefined =>
+export const errorCode = (body: unknown): string | undefined =>
   body && typeof body === 'object' && typeof (body as { error?: unknown }).error === 'string' ? (body as { error: string }).error : undefined;
 
 /** Retry-After as delta-seconds (what the gateway sends), or null. */

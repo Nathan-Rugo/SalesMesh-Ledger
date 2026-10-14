@@ -39,6 +39,8 @@ import {
   leaseStatusChecks,
   listPayouts,
   payoutContext,
+  pendingAccruals,
+  type Accrual,
   recordPayoutSend,
   releaseStatusLease,
   resolvePayout,
@@ -128,6 +130,10 @@ export class PayoutService {
         destinationChanging: boolean;
         disclosure: { version: string; text: string };
         payouts: PayoutRow[];
+        /** Commission still in escrow, quarantined or in a claim (gh-13), with the unmatured totals. */
+        accruals: Accrual[];
+        pendingCount: number;
+        pendingCents: number;
         /** Dormant commission transferred (reference) or being transferred (null) to UFAA (part 3b): not in the balance. */
         remitted: Array<{ cents: number; periodEnd: string; reference: string | null; holderReference: string }>;
       }
@@ -135,11 +141,12 @@ export class PayoutService {
     const agent = await findAgentForUser(this.db, userId);
     if (!agent) return { kind: 'not_provisioned' };
     if (agent.userDisabled) return { kind: 'disabled' };
-    const [escrows, ctx, payouts, remitted] = await Promise.all([
+    const [escrows, ctx, payouts, remitted, pending] = await Promise.all([
       claimableEscrows(this.db, agent.agentId),
       payoutContext(this.db, agent.agentId),
       listPayouts(this.db, agent.agentId),
       remittedForAgent(this.db, agent.agentId),
+      pendingAccruals(this.db, agent.agentId, 50),
     ]);
     const cents = escrows.reduce((s, e) => s + e.cents, 0) + ctx.carryCents;
     return {
@@ -150,6 +157,7 @@ export class PayoutService {
       disclosure: this.disclosure(),
       payouts,
       remitted,
+      ...pending,
     };
   }
 

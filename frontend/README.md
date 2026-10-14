@@ -49,9 +49,9 @@ src/
 
 Dependency rule: domain imports nothing from data, presentation, React or Next (enforced by ESLint
 `no-restricted-imports` on `src/**/domain/**`). Data implements domain interfaces. Presentation calls
-use cases through `getContainer()`. Use cases return `Result`; nothing throws across layers.
+use cases through the composition root (`getContainer()`; components read it from `useSession().container`, which tests inject). Use cases return `Result`; nothing throws across layers.
 
-`features/agent-ledger` (#13) and `features/admin-oversight` (#14) ship only nav config and an empty state.
+`features/agent-ledger` (#13): balance slip, accrual timeline with hold countdowns, claim flow (Fuliza disclosure, PIN), payout-line verification and payout history over `/api/v1/payouts` and `/api/v1/payout-destinations`, refreshed by visibility-aware polling (15 s while visible; on focus, `online` and hold maturity). `features/admin-oversight` (#14) ships only nav config and an empty state.
 
 ### Auth
 

@@ -1,6 +1,6 @@
 import { ReceiptEmpty } from '@/shared/presentation/ui/receipt';
 
-/** Payouts list before it is wired to the gateway (#13). Says what will appear and when; claims no count. */
+/** No payouts yet: says what will appear and when. */
 export function PayoutsEmptyState() {
   return (
     <ReceiptEmpty eyebrow="Payouts · M-Pesa" icon="wallet" title="Your payouts will show here">

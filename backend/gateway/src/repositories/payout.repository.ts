@@ -123,6 +123,52 @@ export async function claimableEscrows(db: Db, agentId: string, lock = false): P
   return rows.map((r) => ({ escrowId: r.escrow_id, cents: Number(r.cents) }));
 }
 
+export interface Accrual {
+  escrowId: string;
+  cents: number;
+  status: 'HELD' | 'QUARANTINED' | 'CLAIMED';
+  releaseDueAt: Date;
+  /** QUARANTINED's reason, or 'security_hold' for a security-held HELD escrow. */
+  quarantineReason: string | null;
+}
+
+/**
+ * Commission not (yet) in the claimable balance (spec gh-13): unmatured or security-held HELD,
+ * QUARANTINED, CLAIMED; soonest maturity first, at most `limit`. `pendingCount`/`pendingCents`
+ * total every unmatured claimable HELD escrow (not capped by `limit`).
+ */
+export async function pendingAccruals(db: Db, agentId: string, limit = 50): Promise<{ accruals: Accrual[]; pendingCount: number; pendingCents: number }> {
+  const [{ rows }, { rows: [t] }] = await Promise.all([
+    db.query(
+      `SELECT e.escrow_id, (e.gross_commission * 100)::bigint AS cents, e.release_due_at,
+              CASE WHEN e.escrow_status = 'HELD' AND e.security_hold THEN 'QUARANTINED' ELSE e.escrow_status END AS status,
+              CASE WHEN e.security_hold THEN COALESCE(e.quarantine_reason, 'security_hold') ELSE e.quarantine_reason END AS quarantine_reason
+         FROM escrow_accounts e JOIN transactions t USING (transaction_id)
+        WHERE t.agent_id = $1 AND e.gross_commission > 0 AND e.ufaa_return_id IS NULL
+          AND ((e.escrow_status = 'HELD' AND (e.security_hold OR e.release_due_at > NOW())) OR e.escrow_status IN ('QUARANTINED', 'CLAIMED'))
+        ORDER BY e.release_due_at, e.escrow_id LIMIT $2`,
+      [agentId, limit]
+    ),
+    db.query(
+      `SELECT count(*)::int AS n, COALESCE(sum((e.gross_commission * 100)::bigint), 0)::bigint AS cents
+         FROM escrow_accounts e JOIN transactions t USING (transaction_id)
+        WHERE t.agent_id = $1 AND ${CLAIMABLE('e')} AND e.release_due_at > NOW()`,
+      [agentId]
+    ),
+  ]);
+  return {
+    accruals: rows.map((r) => ({
+      escrowId: r.escrow_id,
+      cents: Number(r.cents),
+      status: r.status,
+      releaseDueAt: new Date(r.release_due_at),
+      quarantineReason: r.quarantine_reason,
+    })),
+    pendingCount: Number(t?.n ?? 0),
+    pendingCents: Number(t?.cents ?? 0),
+  };
+}
+
 /** What GET /payouts shows besides history: carry, the ACTIVE destination, a change in flight. */
 export async function payoutContext(db: Db, agentId: string): Promise<{ carryCents: number; active: { destinationId: string; msisdn: string } | null; changing: boolean }> {
   const [{ rows: [a] }, { rows: dests }] = await Promise.all([

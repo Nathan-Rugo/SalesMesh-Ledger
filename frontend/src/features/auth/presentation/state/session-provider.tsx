@@ -18,6 +18,8 @@ export interface SessionContextValue {
   readonly session: Session | null;
   /** True once a silent refresh has been attempted in this page load. */
   readonly probed: boolean;
+  /** The composition root, for other features' use cases. */
+  readonly container: Container;
   resolve(): Promise<void>;
   login(input: LoginInput): Promise<Result<Session, AppError>>;
   changePin(input: ChangePinInput): Promise<Result<Session, AppError>>;
@@ -123,6 +125,7 @@ export function SessionProvider({ children, container: injected }: { children: R
   const value = useMemo<SessionContextValue>(
     () => ({
       ...state,
+      container,
       resolve,
       login: (input) => container.login.execute(input),
       changePin: async (input) => {
