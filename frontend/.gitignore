@@ -1,0 +1,14 @@
+.next/
+out/
+node_modules/
+coverage/
+next-env.d.ts
+*.tsbuildinfo
+.build-id
+.env*.local
+
+# The repo-root `data/` rule (ML datasets) must not swallow Clean Architecture data layers.
+!src/**/data/
+*.stackdump
+# Generated from scripts/sw.template.js by scripts/stamp-sw.mjs
+public/sw.js
