@@ -15,6 +15,7 @@ import { PayoutController } from '../../src/controllers/payout.controller';
 import { B2cClient } from '../../src/daraja/client';
 import { consentHash, DISCLOSURES } from '../../src/domain/payout';
 import { upsertCredential } from '../../src/repositories/auth.repository';
+import { pendingAccruals } from '../../src/repositories/payout.repository';
 import { securityHoldReceipt } from '../../src/repositories/security.repository';
 import { createPayoutRouter } from '../../src/routes/payout.routes';
 import { payoutResolve } from '../../src/scripts/payout-resolve';
@@ -388,6 +389,46 @@ describeDb('agent-claimed payouts (real Postgres)', () => {
     await db.pool.query(`UPDATE users SET disabled_at = NOW() WHERE user_id = $1`, [cooling.userId]);
     expect((await claim(cooling.token)).status).toBe(403);
     expect(await count(db.pool, `SELECT count(*) AS n FROM payouts WHERE agent_id = ANY($1::uuid[])`, [[small.agentId, none.agentId, cooling.agentId]])).toBe(0);
+  });
+
+  it('GET accruals (gh-13): unmatured / security-held HELD, QUARANTINED and CLAIMED, soonest maturity first; pending_* total the unmatured claimable', async () => {
+    const a = await agent();
+    const empty = await get(a.token);
+    expect(empty.body).toMatchObject({ accruals: [], pending_count: 0, pending_cents: 0 });
+
+    await escrow(a.agentId, '12.00'); // matured HELD: in the balance, not an accrual
+    const soon = await escrow(a.agentId, '3.50', { matured: false });
+    const held = await escrow(a.agentId, '7.25', { matured: false });
+    await db.pool.query(`UPDATE escrow_accounts SET release_due_at = NOW() + INTERVAL '3 hours' WHERE escrow_id = $1`, [held.escrowId]);
+    const q = await escrow(a.agentId, '2.00', { status: 'QUARANTINED' });
+    await db.pool.query(`UPDATE escrow_accounts SET quarantine_reason = 'model_decision' WHERE escrow_id = $1`, [q.escrowId]);
+    const sec = await escrow(a.agentId, '1.00');
+    await db.pool.query(`UPDATE escrow_accounts SET security_hold = TRUE, release_due_at = NOW() - INTERVAL '2 hours' WHERE escrow_id = $1`, [sec.escrowId]);
+
+    const r = await get(a.token);
+    expect(r.status).toBe(200);
+    expect(r.body.balance).toMatchObject({ cents: 1200, escrows: 1 });
+    expect(r.body.pending_count).toBe(2);
+    expect(r.body.pending_cents).toBe(1075);
+    expect(r.body.accruals.map((x: { escrow_id: string }) => x.escrow_id)).toEqual([sec.escrowId, q.escrowId, soon.escrowId, held.escrowId]);
+    expect(r.body.accruals[0]).toMatchObject({ amount_cents: 100, status: 'QUARANTINED', quarantine_reason: 'security_hold' });
+    expect(r.body.accruals[1]).toMatchObject({ amount_cents: 200, status: 'QUARANTINED', quarantine_reason: 'model_decision' });
+    expect(r.body.accruals[2]).toMatchObject({ amount_cents: 350, status: 'HELD', quarantine_reason: null });
+    expect(Date.parse(r.body.accruals[3].release_due_at)).toBeGreaterThan(Date.now() + 2 * 3600_000);
+
+    // A claim moves the matured escrow to CLAIMED: it shows as an accrual until the payout settles.
+    expect((await claim(a.token)).status).toBe(202);
+    const after = await get(a.token);
+    expect(after.body.accruals.find((x: { status: string }) => x.status === 'CLAIMED')).toMatchObject({ amount_cents: 1200 });
+  });
+
+  it('pendingAccruals: the list is capped by the limit; pending_count / pending_cents total every unmatured escrow', async () => {
+    const a = await agent();
+    for (const g of ['1.00', '2.00', '3.50']) await escrow(a.agentId, g, { matured: false });
+    const r = await pendingAccruals(db.pool, a.agentId, 2);
+    expect(r.accruals).toHaveLength(2);
+    expect(r.pendingCount).toBe(3);
+    expect(r.pendingCents).toBe(650);
   });
 
   it('over max: the oldest escrows up to the maximum; the rest stays claimable', async () => {

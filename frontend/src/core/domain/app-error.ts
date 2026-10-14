@@ -8,6 +8,26 @@ export type PinErrorReason =
   | 'current_pin_missing'
   | 'pin_mismatch';
 
+/** Gateway refusals of a payout claim or payout-line verification (gh-11), read from the response body. */
+export const PAYOUT_REFUSALS = [
+  'payout_in_progress',
+  'below_minimum',
+  'above_maximum',
+  'no_active_destination',
+  'destination_changing',
+  'disclosure_changed',
+  'temporarily_unavailable',
+  'payout_failed',
+  'payouts_disabled',
+  'agent_not_provisioned',
+  'already_active',
+  'destination_pending',
+  'phone_not_payable',
+  'verification_failed',
+] as const;
+export type PayoutRefusal = (typeof PAYOUT_REFUSALS)[number];
+export const isPayoutRefusal = (v: unknown): v is PayoutRefusal => typeof v === 'string' && (PAYOUT_REFUSALS as readonly string[]).includes(v);
+
 export type AppError =
   | { readonly kind: 'invalid_credentials' }
   | { readonly kind: 'throttled'; readonly retryAfterS: number | null }
@@ -19,6 +39,7 @@ export type AppError =
   | { readonly kind: 'origin_not_allowed' }
   | { readonly kind: 'forbidden' }
   | { readonly kind: 'invalid_request' }
+  | { readonly kind: 'payout_refused'; readonly code: PayoutRefusal }
   | { readonly kind: 'unexpected'; readonly status?: number };
 
 /** Stable, user-facing copy for an error (no enumeration hints). */
@@ -44,8 +65,44 @@ export function errorMessage(e: AppError): string {
       return "Your role can't do that.";
     case 'invalid_request':
       return 'That request was not accepted. Check the details and try again.';
+    case 'payout_refused':
+      return payoutRefusalMessage(e.code);
     case 'unexpected':
       return 'Something went wrong. Try again.';
+  }
+}
+
+/** What a refused claim / line verification means, and the next step. */
+export function payoutRefusalMessage(code: PayoutRefusal): string {
+  switch (code) {
+    case 'payout_in_progress':
+      return 'A payout is already on its way. Wait for it to finish before claiming again.';
+    case 'below_minimum':
+      return 'Your cleared balance is below the payout minimum. Keep selling and claim once it reaches the minimum.';
+    case 'above_maximum':
+      return 'One cleared amount is above the payout maximum. Ask your merchant to pay it out.';
+    case 'no_active_destination':
+      return 'Verify your M-Pesa line first, then claim.';
+    case 'destination_changing':
+      return 'Your payout number is being changed. Claims open again once the change completes or is cancelled.';
+    case 'disclosure_changed':
+      return 'The payout notice has changed. Read it and accept it again.';
+    case 'temporarily_unavailable':
+      return 'Not sent, nothing deducted. Try again in a few minutes.';
+    case 'payout_failed':
+      return 'M-Pesa did not accept the payout. Nothing was deducted: your balance is back.';
+    case 'payouts_disabled':
+      return 'Payouts are switched off for now. Your commission stays safe on your ledger.';
+    case 'agent_not_provisioned':
+      return 'Your agent account is not set up yet. Ask your merchant.';
+    case 'already_active':
+      return 'Your M-Pesa line is already verified.';
+    case 'destination_pending':
+      return 'A verification is already in progress. Watch for a small M-Pesa payment on your phone.';
+    case 'phone_not_payable':
+      return 'Your registered number can’t receive M-Pesa payouts. Ask your merchant to update it.';
+    case 'verification_failed':
+      return 'M-Pesa refused the verification payment. Check your line is active, then try again.';
   }
 }
 
