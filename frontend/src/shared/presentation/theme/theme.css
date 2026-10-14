@@ -1,52 +1,67 @@
-/* SalesMesh design tokens (Design_Inspo.md). Semantic colours resolve through --sm-* variables so
-   the same utilities render the light "daylight" agent shell and the dark "cockpit" admin shell.
-   Every text pairing below is >= 7:1 (WCAG AAA). */
+/* Receipt identity (spec gh-12 brand redesign): an M-Pesa confirmation slip on a sage counter.
+   Every text pairing below is >= 7:1 (WCAG AAA). M-Pesa green #00A859 is for marks/fills only. */
 
 :root {
-  --sm-canvas: #f8fafc; /* Slate 50 */
-  --sm-surface: #ffffff;
-  --sm-inset: #f1f5f9; /* Slate 100 — no muted text on it (6.9:1) */
-  --sm-line: #e2e8f0; /* Slate 200 */
-  --sm-ink: #0f172a; /* 17:1 */
-  --sm-ink-muted: #475569; /* Slate 600: 7.2:1 on Slate 50, 7.6:1 on white */
-  --sm-accent: #075985; /* Sky 800 — Sky 700 #0369A1 is 5.9:1, below AAA for text */
-  --sm-accent-hover: #0c4a6e;
+  --sm-canvas: #eef3ec; /* sage slip */
+  --sm-surface: #ffffff; /* thermal paper */
+  --sm-inset: #f5f8f3; /* muted text 7.8:1 */
+  --sm-line: #cfdacb;
+  --sm-line-strong: #93a698; /* dashed receipt rules, non-text */
+  --sm-ink: #0a1f16; /* 15.3:1 on canvas */
+  --sm-ink-muted: #3d5248; /* 7.5:1 on canvas, 8.4:1 on paper */
+  --sm-accent: #00653a; /* white on it 7.2:1 */
+  --sm-accent-hover: #004d2c;
   --sm-on-accent: #ffffff;
-  --sm-link: #075985;
-  --sm-ring: #0369a1;
-  --sm-danger: #9f1239; /* Rose 800: 8.0:1 */
+  --sm-link: #004d2c; /* #00653A is only 6.4:1 on the canvas, so links go one step darker (8.9:1) */
+  --sm-ring: #00653a;
+  --sm-danger: #9f1239; /* 7.1:1 on canvas */
   --sm-danger-soft: #fff1f2;
+  --sm-stamp: #00653a; /* seal ink: 7.2:1 on paper */
+  /* Logo tile A "Receipt": paper, ink stems, M-Pesa green tick (non-text marks). */
+  --sm-logo-tile: #ffffff;
+  --sm-logo-edge: #cfdacb;
+  --sm-logo-stem: #0a1f16;
+  --sm-logo-tick: #00a859;
   color-scheme: light;
 }
 
+/* Admin: the same receipt under the counter light — night shift. */
 [data-shell='admin'] {
-  --sm-canvas: #090d16; /* Obsidian Slate */
-  --sm-surface: #111827; /* Card Dark */
-  --sm-inset: #0f1522;
-  --sm-line: #1e293b;
-  --sm-ink: #e2e8f0; /* 15.8:1 */
-  --sm-ink-muted: #94a3b8; /* Slate 400 — only on #090D16 (7.6:1); cards switch to Slate 300 */
-  --sm-accent: #7dd3fc;
-  --sm-accent-hover: #bae6fd;
-  --sm-on-accent: #090d16;
-  --sm-link: #7dd3fc;
-  --sm-ring: #7dd3fc;
+  --sm-canvas: #06140e;
+  --sm-surface: #0c2018;
+  --sm-inset: #091a12;
+  --sm-line: #1f3a2d;
+  --sm-line-strong: #3f6352;
+  --sm-ink: #e4eee7; /* 15.9:1 */
+  --sm-ink-muted: #a3b8ac; /* 9.0:1 on canvas, 8.1:1 on cards */
+  --sm-accent: #6edba4;
+  --sm-accent-hover: #9be8c0;
+  --sm-on-accent: #06140e; /* 11:1 */
+  --sm-link: #6edba4;
+  --sm-ring: #6edba4;
   --sm-danger: #fda4af;
   --sm-danger-soft: #2a1118;
+  --sm-stamp: #6edba4;
+  /* Logo tile B "Night ink" (also the launcher icon). */
+  --sm-logo-tile: #0a1f16;
+  --sm-logo-edge: #1f3a2d;
+  --sm-logo-stem: #e4eee7;
+  --sm-logo-tick: #00a859;
   color-scheme: dark;
 }
 [data-shell='admin'] .sm-surface {
-  --sm-ink-muted: #cbd5e1; /* Slate 300: 12:1 on #111827 */
+  --sm-ink-muted: #c2d3c8; /* 10.9:1 on #0C2018 */
 }
 
 @theme inline {
-  --font-sans: var(--font-jakarta), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-sans: var(--font-bricolage), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: var(--font-jetbrains), ui-monospace, 'SFMono-Regular', Menlo, monospace;
 
   --color-canvas: var(--sm-canvas);
   --color-surface: var(--sm-surface);
   --color-inset: var(--sm-inset);
   --color-line: var(--sm-line);
+  --color-line-strong: var(--sm-line-strong);
   --color-ink: var(--sm-ink);
   --color-ink-muted: var(--sm-ink-muted);
   --color-accent: var(--sm-accent);
@@ -56,17 +71,15 @@
   --color-ring: var(--sm-ring);
   --color-danger: var(--sm-danger);
   --color-danger-soft: var(--sm-danger-soft);
+  --color-stamp: var(--sm-stamp);
 }
 
 @theme {
-  /* Brand & Kenyan payment rails */
-  --color-sovereign: #0369a1;
-  --color-sovereign-hover: #0284c7;
+  /* Brand: M-Pesa green (marks/fills only, never text), receipt ink, highlighter (stamp accent,
+     only ever under --sm-ink text: 12.4:1). */
   --color-mpesa: #00a859;
-  --color-mpesa-ink: #065f46;
-  --color-mpesa-soft: #ecfdf5;
-  --color-obsidian: #090d16;
-  --color-card-dark: #111827;
+  --color-receipt-ink: #0a1f16;
+  --color-highlighter: #ffd84d;
 
   /* Semantic escrow lifecycle tokens — exactly as Design_Inspo. `*-ink` is the AAA label colour
      used for pill text; the token text colour itself marks the status dot. */
@@ -95,7 +108,7 @@
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
 
   --animate-roll-in: sm-roll-in 520ms var(--ease-out-quint) both;
-  --animate-rail: sm-rail 3.6s var(--ease-out-quint) infinite;
+  --animate-stamp: sm-stamp 560ms var(--ease-spring) both;
   --animate-fade-up: sm-fade-up 420ms var(--ease-out-quint) both;
 }
 
@@ -109,21 +122,19 @@
     opacity: 1;
   }
 }
-@keyframes sm-rail {
+/* A rubber stamp: lands big and fast, overshoots, settles at its tilt (--stamp-tilt). */
+@keyframes sm-stamp {
   0% {
-    transform: translateX(-100%);
+    transform: scale(2.1) rotate(calc(var(--stamp-tilt, -8deg) - 10deg));
     opacity: 0;
   }
-  10% {
-    opacity: 1;
-  }
-  70% {
-    transform: translateX(0);
+  55% {
+    transform: scale(0.94) rotate(var(--stamp-tilt, -8deg));
     opacity: 1;
   }
   100% {
-    transform: translateX(0);
-    opacity: 0;
+    transform: scale(1) rotate(var(--stamp-tilt, -8deg));
+    opacity: 1;
   }
 }
 @keyframes sm-fade-up {
@@ -162,6 +173,50 @@
     transform: scale(0.97);
     transition-duration: 90ms;
   }
+}
+
+/* Receipt surface: torn (zig-zag) paper edges drawn in the paper colour, so they follow the shell
+   theme. The host needs position: relative; the teeth hang 8 px outside it. */
+@utility torn-bottom {
+  &::after {
+    content: '';
+    position: absolute;
+    inset-inline: 0;
+    top: 100%;
+    height: 8px;
+    background:
+      linear-gradient(135deg, var(--sm-surface) 50%, transparent 50%) 0 -8px / 16px 16px,
+      linear-gradient(-135deg, var(--sm-surface) 50%, transparent 50%) 0 -8px / 16px 16px;
+    pointer-events: none;
+  }
+}
+@utility torn-top {
+  &::before {
+    content: '';
+    position: absolute;
+    inset-inline: 0;
+    bottom: 100%;
+    height: 8px;
+    background:
+      linear-gradient(45deg, var(--sm-surface) 50%, transparent 50%) 0 0 / 16px 16px,
+      linear-gradient(-45deg, var(--sm-surface) 50%, transparent 50%) 0 0 / 16px 16px;
+    pointer-events: none;
+  }
+}
+/* Dashed thermal-printer rule between receipt blocks. */
+@utility rule-dashed {
+  border: 0;
+  height: 1.5px;
+  background: repeating-linear-gradient(90deg, var(--sm-line-strong) 0 6px, transparent 6px 11px);
+}
+/* Soft paper shadow that also follows the torn teeth. */
+@utility paper-shadow {
+  filter: drop-shadow(0 1px 1px rgb(10 31 22 / 0.06)) drop-shadow(0 14px 22px rgb(10 31 22 / 0.1));
+}
+
+/* Landing only: set by the boot script in app/page.tsx until GSAP has set the slip's first frame. */
+html.sm-motion [data-hero-receipt] {
+  visibility: hidden;
 }
 
 @media (prefers-reduced-motion: reduce) {

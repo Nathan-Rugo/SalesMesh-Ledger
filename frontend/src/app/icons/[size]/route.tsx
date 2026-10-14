@@ -1,4 +1,8 @@
 import { ImageResponse } from 'next/og';
+import { MARK_ON_TILE, MARK_STEMS, MARK_TICK, SQUIRCLE } from '@/shared/presentation/ui/logo';
+
+// Launcher tile B "Night ink": dark squircle, pale stems, M-Pesa green tick.
+const INK = '#0A1F16';
 
 // Built once per size at build time; any other size is a 404.
 export const dynamic = 'force-static';
@@ -20,37 +24,18 @@ export async function GET(_req: Request, { params }: { params: Promise<{ size: s
   const { size } = await params;
   const v = VARIANTS[size as Variant];
   if (!v) return new Response('Not found', { status: 404 });
-  // Maskable icons fill the canvas and keep the mark inside the 80 % safe zone.
-  const mark = Math.round(v.px * (v.maskable ? 0.56 : 0.72));
+  // "any": the Night-ink squircle. Maskable: the same M on a full-bleed ink canvas; at 62 % its
+  // farthest stroke corner is 0.33 of the size from centre, inside the 0.40 safe-zone radius.
   return new ImageResponse(
     (
-      <div
-        style={{
-          width: '100%',
-          height: '100%',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: v.maskable ? '#075985' : 'transparent',
-        }}
-      >
-        <div
-          style={{
-            width: v.maskable ? mark : v.px,
-            height: v.maskable ? mark : v.px,
-            borderRadius: v.maskable ? 0 : v.px * 0.28,
-            background: '#075985',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <svg width={mark} height={mark} viewBox="0 0 32 32">
-            <path d="M8 11h16M8 21h16" stroke="#E0F2FE" strokeWidth="2.4" strokeLinecap="round" />
-            <path d="M12 11l8 10" stroke="#00A859" strokeWidth="2.4" strokeLinecap="round" />
-            <circle cx="20" cy="21" r="2.6" fill="#00A859" stroke="#075985" strokeWidth="1.2" />
-          </svg>
-        </div>
+      <div style={{ width: '100%', height: '100%', display: 'flex', background: v.maskable ? INK : 'transparent' }}>
+        <svg width={v.px} height={v.px} viewBox="0 0 256 256">
+          {v.maskable ? null : <path d={SQUIRCLE} fill={INK} />}
+          <g transform={MARK_ON_TILE} fill="none" strokeWidth="36" strokeLinecap="round" strokeLinejoin="round">
+            <path d={MARK_STEMS} stroke="#E4EEE7" />
+            <path d={MARK_TICK} stroke="#00A859" />
+          </g>
+        </svg>
       </div>
     ),
     { width: v.px, height: v.px, headers: { 'Cache-Control': 'public, max-age=31536000, immutable' } }

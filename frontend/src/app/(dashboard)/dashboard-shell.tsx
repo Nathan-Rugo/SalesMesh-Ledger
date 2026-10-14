@@ -1,18 +1,17 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
-import { useState, type ReactNode } from 'react';
+import { usePathname } from 'next/navigation';
+import type { ReactNode } from 'react';
 import { adminNav } from '@/features/admin-oversight/presentation/admin-nav';
 import { agentNav } from '@/features/agent-ledger/presentation/agent-nav';
 import type { Role } from '@/features/auth/domain/entities/session';
 import { RoleGuard } from '@/features/auth/presentation/components/role-guard';
-import { useSession } from '@/features/auth/presentation/state/session-provider';
+import { SignOutButton } from '@/features/auth/presentation/components/sign-out-button';
 import type { NavItem } from '@/shared/presentation/nav';
 import { cn } from '@/shared/presentation/ui/cn';
 import { Icon } from '@/shared/presentation/ui/icon';
 import { Logo } from '@/shared/presentation/ui/logo';
-import { useToast } from '@/shared/presentation/ui/toast';
 
 const SHELLS: Record<'agent' | 'admin', { role: Role; nav: readonly NavItem[]; label: string }> = {
   agent: { role: 'SALES_AGENT', nav: agentNav, label: 'Agent' },
@@ -33,38 +32,13 @@ function ShellSkeleton() {
   );
 }
 
-function SignOutButton({ className, compact = false }: { className?: string; compact?: boolean }) {
-  const { logout } = useSession();
-  const router = useRouter();
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  return (
-    <button
-      type="button"
-      disabled={busy}
-      onClick={async () => {
-        setBusy(true);
-        const r = await logout();
-        if (r.ok) {
-          router.replace('/login');
-          return;
-        }
-        setBusy(false);
-        toast("Couldn't reach SalesMesh to sign you out. Check your connection and try again.");
-      }}
-      className={cn('press flex min-h-11 cursor-pointer items-center gap-3 rounded-xl text-ink-muted hover:bg-inset hover:text-ink', className)}
-    >
-      <Icon name="logout" />
-      <span className={compact ? 'text-xs font-semibold' : 'text-[15px] font-semibold'}>{busy ? 'Signing out…' : 'Sign out'}</span>
-    </button>
-  );
-}
-
 export function DashboardShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const area = pathname.startsWith('/admin') ? 'admin' : 'agent';
   const shell = SHELLS[area];
-  const isActive = (href: string) => pathname === href || pathname.startsWith(`${href}/`);
+  // The role home (first item) is active only on itself, or every sub-page would light it up too.
+  const home = shell.nav[0]?.href;
+  const isActive = (href: string) => pathname === href || (href !== home && pathname.startsWith(`${href}/`));
 
   return (
     <div data-shell={area} className="min-h-dvh bg-canvas text-ink">
@@ -79,7 +53,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
         <nav aria-label="Main" className="fixed inset-y-0 left-0 hidden w-60 flex-col border-r border-line bg-canvas px-3 py-5 md:flex">
           <div className="px-3 pb-6">
             <Logo />
-            <p className="mt-1 text-sm text-ink-muted">{shell.label}</p>
+            <p className="mt-2 font-mono text-[12px] font-medium tracking-[0.12em] text-ink-muted uppercase">{shell.label}</p>
           </div>
           <ul className="flex flex-1 flex-col gap-1">
             {shell.nav.map((item) => (
@@ -89,7 +63,9 @@ export function DashboardShell({ children }: { children: ReactNode }) {
                   aria-current={isActive(item.href) ? 'page' : undefined}
                   className={cn(
                     'press flex min-h-11 items-center gap-3 rounded-xl px-3 text-[15px] font-semibold',
-                    isActive(item.href) ? 'sm-surface border border-line bg-surface text-ink' : 'text-ink-muted hover:bg-inset hover:text-ink'
+                    isActive(item.href)
+                      ? 'sm-surface border border-line bg-surface text-ink shadow-[inset_3px_0_0_var(--sm-accent)]'
+                      : 'text-ink-muted hover:bg-inset hover:text-ink'
                   )}
                 >
                   <Icon name={item.icon} />
@@ -104,7 +80,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
         {/* Mobile header */}
         <header className="flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2 md:hidden">
           <Logo />
-          <span className="text-sm text-ink-muted">{shell.label}</span>
+          <span className="font-mono text-[12px] font-medium tracking-[0.12em] text-ink-muted uppercase">{shell.label}</span>
         </header>
 
         <div className="md:pl-60">
@@ -123,8 +99,9 @@ export function DashboardShell({ children }: { children: ReactNode }) {
                   href={item.href}
                   aria-current={isActive(item.href) ? 'page' : undefined}
                   className={cn(
-                    'press flex min-h-14 flex-col items-center justify-center gap-0.5 rounded-xl text-xs font-semibold',
-                    isActive(item.href) ? 'text-link' : 'text-ink-muted'
+                    'press relative flex min-h-14 flex-col items-center justify-center gap-0.5 rounded-xl text-center text-xs leading-tight font-semibold',
+                    // Active = colour plus a printed tab on top (never colour alone).
+                    isActive(item.href) ? 'text-link before:absolute before:top-0 before:h-[3px] before:w-8 before:rounded-b-full before:bg-accent' : 'text-ink-muted'
                   )}
                 >
                   <Icon name={item.icon} />

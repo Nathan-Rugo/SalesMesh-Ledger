@@ -1,11 +1,11 @@
 import type { Metadata, Viewport } from 'next';
-import { JetBrains_Mono, Plus_Jakarta_Sans } from 'next/font/google';
+import { Bricolage_Grotesque, JetBrains_Mono } from 'next/font/google';
 import type { ReactNode } from 'react';
 import './globals.css';
 import { Providers } from './providers';
 
 // `optional`: no late swap of the hero text, so no LCP re-paint or layout shift on a slow first visit.
-const jakarta = Plus_Jakarta_Sans({ subsets: ['latin'], variable: '--font-jakarta', display: 'optional' });
+const bricolage = Bricolage_Grotesque({ subsets: ['latin'], variable: '--font-bricolage', display: 'optional' });
 const jetbrains = JetBrains_Mono({ subsets: ['latin'], variable: '--font-jetbrains', display: 'swap', weight: ['400', '500', '700'] });
 
 export const metadata: Metadata = {
@@ -24,12 +24,13 @@ export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
   viewportFit: 'cover',
-  themeColor: '#f8fafc',
+  themeColor: '#eef3ec',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en-KE" className={`${jakarta.variable} ${jetbrains.variable}`}>
+    // The landing boot script adds `sm-motion` to <html> before hydration.
+    <html lang="en-KE" suppressHydrationWarning className={`${bricolage.variable} ${jetbrains.variable}`}>
       <body className="min-h-dvh bg-canvas text-ink">
         <Providers>{children}</Providers>
       </body>

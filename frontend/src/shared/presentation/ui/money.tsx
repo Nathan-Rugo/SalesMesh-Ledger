@@ -10,8 +10,8 @@ export interface MoneyProps {
 }
 
 /**
- * Currency Rule: `KES` at 70 % medium, bold mono integer, muted decimals (Slate 600 on light
- * surfaces, Slate 400 on the obsidian canvas via --sm-ink-muted). Read as one string by AT.
+ * Currency Rule: `KES` at 70 % medium, bold mono integer, muted decimals in --sm-ink-muted
+ * (AAA on both the receipt paper and the admin night shell). Read as one string by AT.
  */
 export function Money({ cents, className, roll = false }: MoneyProps) {
   const p = moneyParts(cents);
