@@ -256,8 +256,12 @@ describeDb('auth (real Postgres)', () => {
     const locked = await service.login(u.phone, '4826', client);
     expect(locked.kind).toBe('throttled');
     if (locked.kind === 'throttled') expect(locked.retryAfterS).toBeGreaterThanOrEqual(59);
-    await new Promise((r) => setTimeout(r, 50)); // audit inserts are fire-and-forget
-    const { rows } = await db.pool.query(`SELECT * FROM auth_events WHERE ip = $1 ORDER BY occurred_at`, [client.ip]);
+    // Audit inserts are fire-and-forget: wait for all six (a fixed 50 ms sleep flaked on CI).
+    let rows: Array<Record<string, string>> = [];
+    for (let t = 0; t < 40 && rows.length < 6; t++) {
+      if (t) await new Promise((r) => setTimeout(r, 50));
+      ({ rows } = await db.pool.query(`SELECT * FROM auth_events WHERE ip = $1 ORDER BY occurred_at`, [client.ip]));
+    }
     expect(rows.map((r) => r.event_type)).toEqual([...Array(5).fill('LOGIN_FAILURE'), 'LOGIN_THROTTLED']);
     expect(JSON.stringify(rows)).not.toContain(u.phone.slice(1));
     expect(rows[0].phone_hash).toMatch(/^k1:[0-9a-f]{64}$/);
