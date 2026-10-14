@@ -27,7 +27,7 @@ export function PinInput({ value, onValueChange, length = 6, autoComplete = 'one
             key={i}
             className={cn(
               'flex h-14 items-center justify-center rounded-xl border bg-surface transition-[border-color,box-shadow] duration-150',
-              invalid ? 'border-danger' : focused && i === active ? 'border-ring' : 'border-line',
+              invalid ? 'border-danger' : focused && i === active ? 'border-ring' : 'border-field-edge',
               focused && i === active && 'shadow-[0_0_0_3px_color-mix(in_srgb,var(--sm-ring)_28%,transparent)]'
             )}
           >

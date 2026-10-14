@@ -53,7 +53,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
         <nav aria-label="Main" className="fixed inset-y-0 left-0 hidden w-60 flex-col border-r border-line bg-canvas px-3 py-5 md:flex">
           <div className="px-3 pb-6">
             <Logo />
-            <p className="mt-2 font-mono text-[12px] font-medium tracking-[0.12em] text-ink-muted uppercase">{shell.label}</p>
+            <p className="mt-2 text-[13px] font-medium text-ink-muted">{shell.label}</p>
           </div>
           <ul className="flex flex-1 flex-col gap-1">
             {shell.nav.map((item) => (
@@ -80,7 +80,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
         {/* Mobile header */}
         <header className="flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-2 md:hidden">
           <Logo />
-          <span className="font-mono text-[12px] font-medium tracking-[0.12em] text-ink-muted uppercase">{shell.label}</span>
+          <span className="text-[13px] font-medium text-ink-muted">{shell.label}</span>
         </header>
 
         <div className="md:pl-60">

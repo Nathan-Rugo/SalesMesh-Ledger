@@ -45,7 +45,7 @@ export function ClearedSeal({ size = 'md', animate = false, tilt = '-8deg', clas
         <path d={CLEARED_MARK} fill="none" stroke="currentColor" strokeWidth="36" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
       <span aria-hidden className="flex flex-col leading-none">
-        <span className={cn('font-extrabold tracking-[0.08em] uppercase', s.title)}>Cleared</span>
+        <span className={cn('font-bold tracking-[0.08em] uppercase', s.title)}>Cleared</span>
         <span className={cn('mt-0.5 font-mono font-medium tracking-[0.04em] uppercase', s.sub)}>on the ledger</span>
       </span>
     </span>

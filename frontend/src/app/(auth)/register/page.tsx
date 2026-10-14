@@ -12,7 +12,7 @@ export default function RegisterPage() {
   return (
     <>
       <ReceiptEyebrow className="mb-3">SalesMesh · Activate</ReceiptEyebrow>
-      <h1 className="text-3xl font-extrabold tracking-[-0.03em] text-ink">Set your PIN</h1>
+      <h1 className="text-3xl font-semibold tracking-[-0.025em] text-ink">Set your PIN</h1>
       <p className="mt-2 text-ink-muted">
         Confirm it&rsquo;s you, then choose a PIN only you know. You&rsquo;ll use it every time you sign in.
       </p>

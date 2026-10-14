@@ -14,9 +14,9 @@ export function ReceiptRule({ className }: { className?: string }) {
   return <hr className={cn('rule-dashed my-4', className)} />;
 }
 
-/** Small caps line printed at the top of a slip (e.g. "SALESMESH · LEDGER"). */
+/** Quiet sentence-case label at the top of a slip (e.g. "Available to pay out"). */
 export function ReceiptEyebrow({ children, className }: { children: ReactNode; className?: string }) {
-  return <p className={cn('font-mono text-[12px] font-medium tracking-[0.12em] text-ink-muted uppercase', className)}>{children}</p>;
+  return <p className={cn('text-[13px] font-medium text-ink-muted', className)}>{children}</p>;
 }
 
 /** One "label ........ value" line. Render inside a <dl>. */

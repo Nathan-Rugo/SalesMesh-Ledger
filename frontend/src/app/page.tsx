@@ -5,11 +5,11 @@ import { cn } from '@/shared/presentation/ui/cn';
 import { InstallPrompt } from '@/shared/presentation/ui/install-prompt';
 import { Logo } from '@/shared/presentation/ui/logo';
 import { SiteFooter } from '@/shared/presentation/ui/site-footer';
+import { BeamFlow } from './_landing/beam-flow';
+import { Bento } from './_landing/bento';
 import { HeroReceipt } from './_landing/hero-receipt';
 import { LandingMotion } from './_landing/landing-motion';
-import { LedgerSection } from './_landing/ledger-section';
 import { MOTION_BOOT } from './_landing/motion-boot';
-import { RailSection } from './_landing/rail-section';
 
 function Ctas({ className }: { className?: string }) {
   return (
@@ -29,50 +29,65 @@ export default function Home() {
     <div className="flex min-h-dvh flex-col overflow-x-clip">
       <script dangerouslySetInnerHTML={{ __html: MOTION_BOOT }} />
       <SessionRedirect />
-      <header className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 pt-[max(1rem,env(safe-area-inset-top))] sm:px-6">
-        <Logo />
-        <div className="flex items-center gap-1">
-          <InstallPrompt className="px-3" />
-          <Link href="/login" className={buttonClasses('ghost')}>
-            Sign in
-          </Link>
+      {/* Frosts once the page scrolls (data-scrolled, set by landing-motion.tsx): the frost layer fades in by opacity only. */}
+      <header data-nav="" className="group/nav sticky top-0 z-30 pt-[env(safe-area-inset-top)]">
+        <span
+          aria-hidden
+          className="absolute inset-0 -z-10 border-b border-line bg-canvas/85 opacity-0 backdrop-blur-md transition-opacity duration-300 group-data-scrolled/nav:opacity-100"
+        />
+        <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
+          <Logo />
+          <div className="flex items-center gap-1">
+            <InstallPrompt className="px-3" />
+            <Link href="/login" className={buttonClasses('ghost', false, 'whitespace-nowrap')}>
+              Sign in
+            </Link>
+          </div>
         </div>
       </header>
 
       <main className="flex-1">
-        <section className="mx-auto grid w-full max-w-6xl items-center gap-12 px-4 py-10 sm:px-6 lg:grid-cols-[1.1fr_1fr] lg:gap-16 lg:py-20">
-          <div className="flex flex-col items-start gap-6">
-            <p className="inline-flex items-center gap-2 rounded-full bg-highlighter px-3 py-1 font-mono text-[12px] font-medium tracking-[0.1em] text-receipt-ink uppercase">
-              Commission over M-Pesa
-            </p>
-            <h1 className="max-w-[15ch] text-[2.6rem] leading-[1.02] font-extrabold tracking-[-0.04em] text-balance text-ink sm:text-[4rem]">
-              Commission you can trace to the shilling.
+        <section className="mx-auto w-full max-w-6xl px-4 pt-10 pb-16 sm:px-6 lg:pt-16 lg:pb-24">
+          <div className="flex flex-col items-center gap-6 text-center">
+            <h1 className="max-w-[24ch] text-[2.1rem] leading-[1.08] font-medium tracking-[-0.035em] text-balance text-ink sm:text-[2.9rem] lg:text-[3.4rem]">
+              Commission you can trace to the shilling.{' '}
+              <span className="text-ink-muted">Held until the payment settles, then sent to your M-Pesa.</span>
             </h1>
-            <p className="max-w-[46ch] text-lg leading-relaxed text-ink-muted">
-              Every sale you close is held in escrow until the customer&rsquo;s M-Pesa payment settles, then paid to your phone. Each step is
-              written to a ledger nobody can quietly edit.
-            </p>
-            <Ctas />
+            <p className="max-w-[48ch] text-lg leading-relaxed text-ink-muted">Every step is written to a ledger nobody can quietly edit.</p>
+            <Ctas className="justify-center" />
             <p className="text-sm text-ink-muted">New agents: your merchant gives you a one-time PIN to activate.</p>
           </div>
-          <div className="flex justify-center lg:justify-end">
-            <HeroReceipt />
+
+          {/* Hero stage: the slip prints from the slot on a dot grid, framed by the border beam. */}
+          <div data-stage="" className="border-beam mx-auto mt-12 max-w-5xl rounded-[1.75rem] [--beam-fill:var(--sm-inset)] lg:mt-14">
+            <div className="dot-grid relative flex justify-center rounded-[1.75rem] px-3 pt-10 pb-12 sm:px-6 sm:pt-14 sm:pb-16">
+              <HeroReceipt />
+              <dl aria-label="What the slip records" className="pointer-events-none absolute inset-y-0 hidden w-full max-w-5xl items-center justify-between px-8 lg:flex">
+                <div className="sm-surface pointer-events-auto flex flex-col gap-0.5 rounded-xl border border-line bg-surface px-4 py-3 text-left shadow-soft">
+                  <dt className="text-[13px] text-ink-muted">Callback fingerprint</dt>
+                  <dd className="font-mono text-[14px] text-ink">9f3a·c1e0</dd>
+                </div>
+                <div className="sm-surface pointer-events-auto flex flex-col gap-0.5 rounded-xl border border-line bg-surface px-4 py-3 text-left shadow-soft">
+                  <dt className="text-[13px] text-ink-muted">Held in escrow</dt>
+                  <dd className="font-mono text-[14px] text-ink">
+                    10:42 <span aria-hidden>→</span>
+                    <span className="sr-only">to</span> 16:05
+                  </dd>
+                </div>
+              </dl>
+            </div>
           </div>
         </section>
 
-        <RailSection />
-        <LedgerSection />
+        <BeamFlow />
+        <Bento />
 
-        <section aria-labelledby="cta-heading" className="mx-auto w-full max-w-6xl px-4 py-16 sm:px-6 lg:py-24">
-          <div className="sm-surface paper-shadow torn-top torn-bottom relative my-2 flex flex-col items-start gap-6 bg-surface px-6 py-10 sm:px-10 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-col gap-2">
-              <h2 id="cta-heading" className="max-w-[20ch] text-[1.75rem] leading-[1.1] font-extrabold tracking-[-0.03em] text-ink sm:text-4xl">
-                Your next commission, on a receipt you can check.
-              </h2>
-              <p className="text-ink-muted">Sign in with your phone number and PIN, or activate with the PIN from your merchant.</p>
-            </div>
-            <Ctas className="lg:shrink-0" />
-          </div>
+        <section aria-labelledby="cta-heading" className="mx-auto flex w-full max-w-6xl flex-col items-center gap-6 px-4 pt-4 pb-20 text-center sm:px-6 lg:pb-28">
+          <h2 id="cta-heading" className="max-w-[22ch] text-[1.9rem] leading-[1.12] font-medium tracking-[-0.03em] text-balance text-ink sm:text-[2.75rem]">
+            Your next commission, on a receipt you can check.
+          </h2>
+          <p className="max-w-[52ch] text-ink-muted">Sign in with your phone number and PIN, or activate with the PIN from your merchant.</p>
+          <Ctas className="justify-center" />
         </section>
       </main>
 
