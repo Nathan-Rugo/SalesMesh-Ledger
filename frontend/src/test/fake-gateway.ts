@@ -34,3 +34,58 @@ export function fakeFetch(routes: Record<string, Handler>) {
 
 export const bodyOf = (init: RequestInit): unknown => JSON.parse(String(init.body));
 export const authHeader = (init: RequestInit): string | undefined => (init.headers as Record<string, string>).Authorization;
+
+/** A payout `view` as GET /api/v1/payouts and POST /claim send it (payout.controller.ts). */
+export const payoutView = (o: Record<string, unknown> = {}) => ({
+  payout_id: 'p-1',
+  status: 'SENT',
+  amount: 1235,
+  msisdn: '2547******78',
+  receipt: null,
+  failure_reason: null,
+  disclosure_version: '1',
+  consent_hash: 'c'.repeat(64),
+  created_at: '2026-10-14T08:00:00.000Z',
+  resolved_at: null,
+  ...o,
+});
+
+/** An accrual row of GET /api/v1/payouts (gh-13). */
+export const accrualView = (o: Record<string, unknown> = {}) => ({
+  escrow_id: 'e-1',
+  amount_cents: 35_000,
+  status: 'HELD',
+  release_due_at: new Date(Date.now() + 3600_000).toISOString(),
+  quarantine_reason: null,
+  ...o,
+});
+
+/** GET /api/v1/payouts body; `balance` fields merge into the default balance. */
+export const ledgerBody = (o: { balance?: Record<string, unknown> } & Record<string, unknown> = {}) => {
+  const { balance, ...rest } = o;
+  return {
+    balance: { amount: 1235, cents: 123_523, escrows: 2, carry_cents: 0, payable_now: 1235, min_amount: 10, max_amount: 150_000, ...balance },
+    destination: '2547******78',
+    destination_changing: false,
+    disclosure: { version: '1', text: 'Fuliza notice v1' },
+    payouts: [],
+    accruals: [],
+    pending_count: 0,
+    pending_cents: 0,
+    remitted: [],
+    ...rest,
+  };
+};
+
+/** A payout-destination `view` (payout_destination.controller.ts). */
+export const lineView = (o: Record<string, unknown> = {}) => ({
+  destination_id: 'd-1',
+  type: 'PERSONAL_MPESA',
+  msisdn: '2547******78',
+  status: 'PENDING_VERIFICATION',
+  reject_reason: null,
+  verified_at: null,
+  cooling_off_until: null,
+  created_at: '2026-10-14T08:00:00.000Z',
+  ...o,
+});

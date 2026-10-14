@@ -39,3 +39,24 @@ export function escrowLabel(status: EscrowStatus): string {
       return 'Remitted (UFAA)';
   }
 }
+
+/** Escrow states as the gateway stores them (escrow_accounts.escrow_status). */
+export type GatewayEscrowStatus = 'HELD' | 'CLAIMED' | 'QUARANTINED' | 'RELEASED' | 'REMITTED';
+
+/**
+ * Gateway state → lifecycle state. `matured` is the server snapshot's view (release_due_at passed);
+ * a security hold quarantines whatever the stored state is.
+ */
+export function fromGatewayEscrow(status: GatewayEscrowStatus, o: { matured: boolean; securityHold: boolean }): EscrowStatus {
+  if (o.securityHold || status === 'QUARANTINED') return 'QUARANTINED';
+  switch (status) {
+    case 'HELD':
+      return o.matured ? 'CLEAR' : 'ESCROW_HOLD';
+    case 'CLAIMED':
+      return 'CLEAR';
+    case 'RELEASED':
+      return 'RELEASED';
+    case 'REMITTED':
+      return 'REMITTED';
+  }
+}
