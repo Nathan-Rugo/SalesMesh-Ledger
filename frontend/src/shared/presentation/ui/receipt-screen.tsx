@@ -21,7 +21,7 @@ export function ReceiptScreen({ eyebrow, code, title, children, actions, inline 
           {code ? <span className="font-mono text-[13px] text-ink-muted tabular-nums">{code}</span> : null}
         </div>
         <ReceiptRule className="my-0" />
-        <h1 className="text-3xl font-extrabold tracking-[-0.03em] text-ink">{title}</h1>
+        <h1 className="text-3xl font-semibold tracking-[-0.025em] text-ink">{title}</h1>
         <div className="flex flex-col gap-3 text-ink-muted">{children}</div>
         <ReceiptRule className="my-1" />
         <div className="flex flex-col gap-3">{actions}</div>

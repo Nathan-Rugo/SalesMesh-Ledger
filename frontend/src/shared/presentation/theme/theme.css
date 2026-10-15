@@ -1,60 +1,85 @@
 /* Receipt identity (spec gh-12 brand redesign): an M-Pesa confirmation slip on a sage counter.
    Every text pairing below is >= 7:1 (WCAG AAA). M-Pesa green #00A859 is for marks/fills only. */
 
+/* Redesign pass (spec gh-12 redesign): cooler paper, hairline borders, layered soft shadows. */
 :root {
-  --sm-canvas: #eef3ec; /* sage slip */
+  --sm-canvas: #f3f6f4; /* cool paper */
   --sm-surface: #ffffff; /* thermal paper */
-  --sm-inset: #f5f8f3; /* muted text 7.8:1 */
-  --sm-line: #cfdacb;
-  --sm-line-strong: #93a698; /* dashed receipt rules, non-text */
-  --sm-ink: #0a1f16; /* 15.3:1 on canvas */
-  --sm-ink-muted: #3d5248; /* 7.5:1 on canvas, 8.4:1 on paper */
-  --sm-accent: #00653a; /* white on it 7.2:1 */
+  --sm-inset: #edf2ee;
+  --sm-line: #dde5e0; /* hairline */
+  --sm-line-strong: #9fb0a6; /* dashed receipt rules, non-text */
+  --sm-field-edge: #7d8e86; /* idle input border (WCAG 1.4.11): 3.45:1 on surface, 3.17:1 on canvas */
+  --sm-ink: #0a1f16;
+  --sm-ink-muted: #3d5248;
+  --sm-accent: #00653a; /* white on it 7.2:1; only 6.6:1 on the canvas, so never text on the canvas */
   --sm-accent-hover: #004d2c;
   --sm-on-accent: #ffffff;
-  --sm-link: #004d2c; /* #00653A is only 6.4:1 on the canvas, so links go one step darker (8.9:1) */
+  --sm-link: #004d2c; /* #00653A is under 7:1 on the canvas, so links go one step darker */
   --sm-ring: #00653a;
-  --sm-danger: #9f1239; /* 7.1:1 on canvas */
+  --sm-danger: #9f1239;
   --sm-danger-soft: #fff1f2;
   --sm-stamp: #00653a; /* seal ink: 7.2:1 on paper */
+  --sm-beam: #00a859; /* border-beam / flow pulse (non-text) */
+  /* Layered soft shadows: contact + ambient, replacing the single drop-shadow. */
+  --sm-shadow-1: 0 1px 1px rgb(10 31 22 / 0.04), 0 2px 4px -1px rgb(10 31 22 / 0.05), 0 8px 18px -6px rgb(10 31 22 / 0.08);
+  --sm-shadow-2:
+    0 1px 1px rgb(10 31 22 / 0.04), 0 4px 8px -2px rgb(10 31 22 / 0.06), 0 18px 36px -10px rgb(10 31 22 / 0.12),
+    0 40px 72px -28px rgb(10 31 22 / 0.16);
+  /* Night set: the admin shell and the landing's dark bands. */
+  --sm-night-canvas: #06140e;
+  --sm-night-surface: #0c2018;
+  --sm-night-inset: #091a12;
+  --sm-night-line: #1f3a2d;
+  --sm-night-line-strong: #3f6352;
+  --sm-night-field-edge: #5e8270; /* 3.97:1 on night surface, 4.40:1 on night canvas */
+  --sm-night-ink: #e4eee7; /* 15.9:1 */
+  --sm-night-ink-muted: #a3b8ac; /* 9.0:1 on canvas, 8.1:1 on surface */
+  --sm-night-accent: #6edba4;
+  --sm-night-accent-hover: #9be8c0;
   /* Logo tile A "Receipt": paper, ink stems, M-Pesa green tick (non-text marks). */
   --sm-logo-tile: #ffffff;
-  --sm-logo-edge: #cfdacb;
+  --sm-logo-edge: #dde5e0;
   --sm-logo-stem: #0a1f16;
   --sm-logo-tick: #00a859;
   color-scheme: light;
 }
 
-/* Admin: the same receipt under the counter light — night shift. */
-[data-shell='admin'] {
-  --sm-canvas: #06140e;
-  --sm-surface: #0c2018;
-  --sm-inset: #091a12;
-  --sm-line: #1f3a2d;
-  --sm-line-strong: #3f6352;
-  --sm-ink: #e4eee7; /* 15.9:1 */
-  --sm-ink-muted: #a3b8ac; /* 9.0:1 on canvas, 8.1:1 on cards */
-  --sm-accent: #6edba4;
-  --sm-accent-hover: #9be8c0;
-  --sm-on-accent: #06140e; /* 11:1 */
-  --sm-link: #6edba4;
-  --sm-ring: #6edba4;
+/* Admin (night shift) and landing dark bands share the night set. */
+[data-shell='admin'],
+[data-band='night'] {
+  --sm-canvas: var(--sm-night-canvas);
+  --sm-surface: var(--sm-night-surface);
+  --sm-inset: var(--sm-night-inset);
+  --sm-line: var(--sm-night-line);
+  --sm-line-strong: var(--sm-night-line-strong);
+  --sm-field-edge: var(--sm-night-field-edge);
+  --sm-ink: var(--sm-night-ink);
+  --sm-ink-muted: var(--sm-night-ink-muted);
+  --sm-accent: var(--sm-night-accent);
+  --sm-accent-hover: var(--sm-night-accent-hover);
+  --sm-on-accent: var(--sm-night-canvas); /* 11:1 */
+  --sm-link: var(--sm-night-accent);
+  --sm-ring: var(--sm-night-accent);
   --sm-danger: #fda4af;
   --sm-danger-soft: #2a1118;
-  --sm-stamp: #6edba4;
+  --sm-stamp: var(--sm-night-accent);
+  --sm-beam: var(--sm-night-accent);
+  --sm-shadow-1: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 8px 20px -8px rgb(0 0 0 / 0.5);
+  --sm-shadow-2: 0 1px 0 rgb(255 255 255 / 0.05) inset, 0 24px 48px -16px rgb(0 0 0 / 0.6);
   /* Logo tile B "Night ink" (also the launcher icon). */
   --sm-logo-tile: #0a1f16;
-  --sm-logo-edge: #1f3a2d;
-  --sm-logo-stem: #e4eee7;
+  --sm-logo-edge: var(--sm-night-line);
+  --sm-logo-stem: var(--sm-night-ink);
   --sm-logo-tick: #00a859;
   color-scheme: dark;
 }
-[data-shell='admin'] .sm-surface {
+[data-shell='admin'] .sm-surface,
+[data-band='night'] .sm-surface {
   --sm-ink-muted: #c2d3c8; /* 10.9:1 on #0C2018 */
 }
 
 @theme inline {
-  --font-sans: var(--font-bricolage), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-sans: var(--font-instrument), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: var(--font-jetbrains), ui-monospace, 'SFMono-Regular', Menlo, monospace;
 
   --color-canvas: var(--sm-canvas);
@@ -62,6 +87,7 @@
   --color-inset: var(--sm-inset);
   --color-line: var(--sm-line);
   --color-line-strong: var(--sm-line-strong);
+  --color-field-edge: var(--sm-field-edge);
   --color-ink: var(--sm-ink);
   --color-ink-muted: var(--sm-ink-muted);
   --color-accent: var(--sm-accent);
@@ -72,37 +98,38 @@
   --color-danger: var(--sm-danger);
   --color-danger-soft: var(--sm-danger-soft);
   --color-stamp: var(--sm-stamp);
+  --color-beam: var(--sm-beam);
+  --shadow-soft: var(--sm-shadow-1);
+  --shadow-lift: var(--sm-shadow-2);
 }
 
 @theme {
-  /* Brand: M-Pesa green (marks/fills only, never text), receipt ink, highlighter (stamp accent,
-     only ever under --sm-ink text: 12.4:1). */
-  --color-mpesa: #00a859;
+  /* Brand: receipt ink (phone frame, printer slot). */
   --color-receipt-ink: #0a1f16;
-  --color-highlighter: #ffd84d;
 
-  /* Semantic escrow lifecycle tokens — exactly as Design_Inspo. `*-ink` is the AAA label colour
-     used for pill text; the token text colour itself marks the status dot. */
-  --color-escrow-clear: #059669;
-  --color-escrow-clear-bg: #ecfdf5;
-  --color-escrow-clear-border: #a7f3d0;
-  --color-escrow-clear-ink: #065f46;
-  --color-escrow-hold: #d97706;
-  --color-escrow-hold-bg: #fffbeb;
-  --color-escrow-hold-border: #fde68a;
-  --color-escrow-hold-ink: #78350f;
-  --color-escrow-quarantined: #e11d48;
-  --color-escrow-quarantined-bg: #fff1f2;
-  --color-escrow-quarantined-border: #fecdd3;
-  --color-escrow-quarantined-ink: #9f1239;
-  --color-escrow-canary: #7c3aed;
-  --color-escrow-canary-bg: #f5f3ff;
-  --color-escrow-canary-border: #ddd6fe;
-  --color-escrow-canary-ink: #5b21b6;
-  --color-escrow-remitted: #6366f1;
-  --color-escrow-remitted-bg: #eef2ff;
-  --color-escrow-remitted-border: #c7d2fe;
-  --color-escrow-remitted-ink: #3730a3;
+  /* Escrow lifecycle tones, derived from the brand (no Tailwind defaults): M-Pesa green, the
+     highlighter's amber, a receipt-red, a ledger teal, and receipt ink for remitted. `*-ink` is the
+     pill label colour (>= 7:1 on its -bg); the bare token colours the status dot only. */
+  --color-escrow-clear: #00a859;
+  --color-escrow-clear-bg: #e7f5ec;
+  --color-escrow-clear-border: #b3dfc4;
+  --color-escrow-clear-ink: #004d2c;
+  --color-escrow-hold: #d9a400;
+  --color-escrow-hold-bg: #fdf5d8;
+  --color-escrow-hold-border: #eed98a;
+  --color-escrow-hold-ink: #573a00;
+  --color-escrow-quarantined: #c8323f;
+  --color-escrow-quarantined-bg: #fcedee;
+  --color-escrow-quarantined-border: #efc2c6;
+  --color-escrow-quarantined-ink: #7e1520;
+  --color-escrow-canary: #1f8a8a;
+  --color-escrow-canary-bg: #e6f3f2;
+  --color-escrow-canary-border: #b3d9d7;
+  --color-escrow-canary-ink: #0e4747;
+  --color-escrow-remitted: #5b6f66;
+  --color-escrow-remitted-bg: #edf1ef;
+  --color-escrow-remitted-border: #cdd8d2;
+  --color-escrow-remitted-ink: #23332c;
 
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
@@ -157,7 +184,6 @@
     background: var(--sm-canvas);
     color: var(--sm-ink);
     font-family: var(--font-sans);
-    font-feature-settings: 'ss01', 'cv11';
     -webkit-font-smoothing: antialiased;
   }
   :focus-visible {
@@ -209,9 +235,55 @@
   height: 1.5px;
   background: repeating-linear-gradient(90deg, var(--sm-line-strong) 0 6px, transparent 6px 11px);
 }
-/* Soft paper shadow that also follows the torn teeth. */
+/* Layered soft paper shadow (contact + ambient) that also follows the torn teeth. */
 @utility paper-shadow {
-  filter: drop-shadow(0 1px 1px rgb(10 31 22 / 0.06)) drop-shadow(0 14px 22px rgb(10 31 22 / 0.1));
+  filter: drop-shadow(0 1px 1px rgb(10 31 22 / 0.05)) drop-shadow(0 4px 6px rgb(10 31 22 / 0.05)) drop-shadow(0 18px 24px rgb(10 31 22 / 0.08));
+}
+
+/* Ramp-style stage: a fine dot grid. */
+@utility dot-grid {
+  background-image: radial-gradient(var(--sm-line-strong) 1px, transparent 1.3px);
+  background-size: 18px 18px;
+}
+/* Radar-style grid lines, fading out from the centre. Use on an aria-hidden layer (the mask hides children). */
+@utility grid-lines {
+  background-image: linear-gradient(var(--sm-line) 1px, transparent 1px), linear-gradient(90deg, var(--sm-line) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, #000 30%, transparent 80%);
+}
+/* Magic UI border beam, rebuilt: a conic sweep behind a 1.5 px gap, rotated by transform only.
+   It turns once (5 s) when landing-motion first sets [data-inview], then rests; reduced motion leaves it still. */
+@utility border-beam {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  &::before {
+    content: '';
+    position: absolute;
+    z-index: -2;
+    left: 50%;
+    top: 50%;
+    width: 250%; /* covers hosts up to ~2.3x taller than wide at every angle */
+    aspect-ratio: 1;
+    translate: -50% -50%;
+    background: conic-gradient(from 0deg, var(--sm-line) 0 78%, var(--sm-beam) 90%, var(--sm-line) 100%);
+  }
+  &::after {
+    content: '';
+    position: absolute;
+    z-index: -1;
+    inset: 1.5px;
+    border-radius: inherit;
+    background: var(--beam-fill, var(--sm-canvas));
+  }
+  &[data-inview]::before {
+    animation: sm-beam 5s linear 1;
+  }
+}
+@keyframes sm-beam {
+  to {
+    rotate: 1turn;
+  }
 }
 
 /* Landing only: set by the boot script in app/page.tsx until GSAP has set the slip's first frame. */
