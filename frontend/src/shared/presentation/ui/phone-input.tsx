@@ -14,7 +14,7 @@ export function PhoneInput({ className, ref, ...rest }: Omit<InputHTMLAttributes
       placeholder="0712 345 678"
       {...rest}
       className={cn(
-        'min-h-13 w-full rounded-xl border border-line bg-surface px-4 font-mono text-lg tracking-tight tabular-nums text-ink',
+        'min-h-13 w-full rounded-xl border border-field-edge bg-surface px-4 font-mono text-lg tracking-tight tabular-nums text-ink',
         'placeholder:text-ink-muted aria-invalid:border-danger',
         className
       )}

@@ -14,7 +14,7 @@ export default function LoginPage() {
     <>
       <SessionRedirect />
       <ReceiptEyebrow className="mb-3">SalesMesh · Sign in</ReceiptEyebrow>
-      <h1 className="text-3xl font-extrabold tracking-[-0.03em] text-ink">Sign in</h1>
+      <h1 className="text-3xl font-semibold tracking-[-0.025em] text-ink">Sign in</h1>
       <p className="mt-2 text-ink-muted">Use the phone number and PIN you set when you activated your account.</p>
       <ReceiptRule className="my-6" />
       <LoginForm />
