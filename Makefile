@@ -1,4 +1,4 @@
-.PHONY: help up down restart logs ps test test-ml test-gateway seed migrate
+.PHONY: help up down restart logs ps test test-ml test-gateway seed migrate fabric-up fabric-down fabric-smoke
 
 PG_CONTAINER ?= salesmesh-postgres
 PG_USER ?= salesmesh_user
@@ -14,6 +14,9 @@ help:
 	@echo "  make test        - Run all unit and integration tests"
 	@echo "  make seed        - Run database DDL and initial seeds (fresh database)"
 	@echo "  make migrate     - Apply infra/scripts/migrations in order (existing database; applied ones skip)"
+	@echo "  make fabric-up   - Start the Fabric testnet (3 CAs, orderer, merchant + auditor peers, commissionchannel)"
+	@echo "  make fabric-down - Remove the Fabric testnet and its generated crypto"
+	@echo "  make fabric-smoke - Full testnet check: up, deploy, 2-org invoke, query, down"
 
 up:
 	docker compose -f infra/docker-compose.yml up -d
@@ -45,3 +48,12 @@ migrate:
 		echo "migrate: $$f"; \
 		docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB) -v ON_ERROR_STOP=1 -q < $$f || exit 1; \
 	done
+
+fabric-up:
+	bash blockchain/network/scripts/network_up.sh
+
+fabric-down:
+	bash blockchain/network/scripts/network_down.sh
+
+fabric-smoke:
+	bash blockchain/network/scripts/smoke_test.sh

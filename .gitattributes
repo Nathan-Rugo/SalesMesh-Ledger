@@ -1,0 +1,7 @@
+# Fabric testnet files run inside Linux containers: keep LF on every checkout
+blockchain/network/**/*.sh text eol=lf
+blockchain/network/**/*.yaml text eol=lf
+blockchain/network/**/*.yml text eol=lf
+blockchain/network/**/*.json text eol=lf
+blockchain/network/**/Dockerfile text eol=lf
+blockchain/network/.env.example text eol=lf
