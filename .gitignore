@@ -5,6 +5,11 @@
 *.key
 crypto-config/
 
+# Fabric testnet generated material (crypto, channel blocks, chaincode packages)
+blockchain/network/organizations/
+blockchain/network/channel-artifacts/
+blockchain/network/packages/
+
 node_modules/
 .next/
 out/

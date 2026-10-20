@@ -1,0 +1,149 @@
+# Channel config for commissionchannel. configtxgen runs inside the cli container,
+# so MSP and cert paths are container paths under /organizations.
+
+Organizations:
+  - &OrdererOrg
+    Name: OrdererMSP
+    ID: OrdererMSP
+    MSPDir: /organizations/ordererOrganizations/salesmesh.test/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('OrdererMSP.member')"
+      Writers:
+        Type: Signature
+        Rule: "OR('OrdererMSP.member')"
+      Admins:
+        Type: Signature
+        Rule: "OR('OrdererMSP.admin')"
+    OrdererEndpoints:
+      - orderer.salesmesh.test:7050
+
+  - &MerchantOrg
+    Name: MerchantMSP
+    ID: MerchantMSP
+    MSPDir: /organizations/peerOrganizations/merchant.salesmesh.test/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('MerchantMSP.admin', 'MerchantMSP.peer', 'MerchantMSP.client')"
+      Writers:
+        Type: Signature
+        Rule: "OR('MerchantMSP.admin', 'MerchantMSP.client')"
+      Admins:
+        Type: Signature
+        Rule: "OR('MerchantMSP.admin')"
+      Endorsement:
+        Type: Signature
+        Rule: "OR('MerchantMSP.peer')"
+    AnchorPeers:
+      - Host: peer0.merchant.salesmesh.test
+        Port: 7051
+
+  - &AuditorOrg
+    Name: AuditorMSP
+    ID: AuditorMSP
+    MSPDir: /organizations/peerOrganizations/auditor.salesmesh.test/msp
+    Policies:
+      Readers:
+        Type: Signature
+        Rule: "OR('AuditorMSP.admin', 'AuditorMSP.peer', 'AuditorMSP.client')"
+      Writers:
+        Type: Signature
+        Rule: "OR('AuditorMSP.admin', 'AuditorMSP.client')"
+      Admins:
+        Type: Signature
+        Rule: "OR('AuditorMSP.admin')"
+      Endorsement:
+        Type: Signature
+        Rule: "OR('AuditorMSP.peer')"
+    AnchorPeers:
+      - Host: peer0.auditor.salesmesh.test
+        Port: 9051
+
+Capabilities:
+  Channel: &ChannelCapabilities
+    V2_0: true
+  Orderer: &OrdererCapabilities
+    V2_0: true
+  Application: &ApplicationCapabilities
+    V2_5: true
+
+Application: &ApplicationDefaults
+  Organizations:
+  Policies:
+    Readers:
+      Type: ImplicitMeta
+      Rule: "ANY Readers"
+    Writers:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+    Admins:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Admins"
+    LifecycleEndorsement:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Endorsement"
+    # MAJORITY of 2 orgs = both merchant and auditor must endorse every transaction.
+    Endorsement:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Endorsement"
+  Capabilities:
+    <<: *ApplicationCapabilities
+
+Orderer: &OrdererDefaults
+  OrdererType: etcdraft
+  EtcdRaft:
+    Consenters:
+      - Host: orderer.salesmesh.test
+        Port: 7050
+        ClientTLSCert: /organizations/ordererOrganizations/salesmesh.test/orderers/orderer.salesmesh.test/tls/server.crt
+        ServerTLSCert: /organizations/ordererOrganizations/salesmesh.test/orderers/orderer.salesmesh.test/tls/server.crt
+  BatchTimeout: 2s
+  BatchSize:
+    MaxMessageCount: 10
+    AbsoluteMaxBytes: 99 MB
+    PreferredMaxBytes: 512 KB
+  Organizations:
+  Policies:
+    Readers:
+      Type: ImplicitMeta
+      Rule: "ANY Readers"
+    Writers:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+    Admins:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Admins"
+    BlockValidation:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+
+Channel: &ChannelDefaults
+  Policies:
+    Readers:
+      Type: ImplicitMeta
+      Rule: "ANY Readers"
+    Writers:
+      Type: ImplicitMeta
+      Rule: "ANY Writers"
+    Admins:
+      Type: ImplicitMeta
+      Rule: "MAJORITY Admins"
+  Capabilities:
+    <<: *ChannelCapabilities
+
+Profiles:
+  ChannelUsingRaft:
+    <<: *ChannelDefaults
+    Orderer:
+      <<: *OrdererDefaults
+      Organizations:
+        - *OrdererOrg
+      Capabilities: *OrdererCapabilities
+    Application:
+      <<: *ApplicationDefaults
+      Organizations:
+        - *MerchantOrg
+        - *AuditorOrg
+      Capabilities: *ApplicationCapabilities
