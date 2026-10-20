@@ -1,4 +1,8 @@
-.PHONY: help up down restart logs ps test test-ml test-gateway seed
+.PHONY: help up down restart logs ps test test-ml test-gateway seed migrate
+
+PG_CONTAINER ?= salesmesh-postgres
+PG_USER ?= salesmesh_user
+PG_DB ?= salesmesh_db
 
 help:
 	@echo "SalesMesh Ledger Monorepo Commands:"
@@ -8,7 +12,8 @@ help:
 	@echo "  make logs        - Tail container logs"
 	@echo "  make ps          - View container status"
 	@echo "  make test        - Run all unit and integration tests"
-	@echo "  make seed        - Run database DDL and initial seeds"
+	@echo "  make seed        - Run database DDL and initial seeds (fresh database)"
+	@echo "  make migrate     - Apply infra/scripts/migrations in order (existing database; applied ones skip)"
 
 up:
 	docker compose -f infra/docker-compose.yml up -d
@@ -32,4 +37,11 @@ test:
 	cd backend/gateway && npm test
 
 seed:
-	docker exec -i salesmesh-postgres psql -U salesmesh_user -d salesmesh_db < infra/scripts/init_db.sql
+	docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB) < infra/scripts/init_db.sql
+
+# Each migration is idempotent (schema_migrations guard), so re-running is safe; stops at the first failure.
+migrate:
+	@for f in infra/scripts/migrations/*.sql; do \
+		echo "migrate: $$f"; \
+		docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB) -v ON_ERROR_STOP=1 -q < $$f || exit 1; \
+	done
