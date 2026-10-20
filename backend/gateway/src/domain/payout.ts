@@ -104,8 +104,10 @@ export interface Consent {
 }
 
 /**
- * SHA-256 (hex) over the canonical JSON (sorted keys, no whitespace) of what the agent agreed to:
- * consumed by the chaincode's AuthorisePayout (#9), which recomputes it from the payout row.
+ * SHA-256 (hex) over the canonical JSON (sorted keys, no whitespace) of what the agent agreed to.
+ * Its preimage includes the MSISDN, so this hash never goes on chain (it is brute-forceable): the
+ * chaincode's AuthorisePayout (#9) receives consentDigest = HMAC-SHA256(gateway key, consentHash)
+ * instead and only checks it is hex64. The key and the preimage stay with the gateway (#10).
  */
 export function consentHash(c: Consent): string {
   return sha256(

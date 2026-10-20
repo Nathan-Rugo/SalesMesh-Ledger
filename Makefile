@@ -1,4 +1,4 @@
-.PHONY: help up down restart logs ps test test-ml test-gateway seed migrate fabric-up fabric-down fabric-smoke
+.PHONY: help up down restart logs ps test test-ml test-gateway seed migrate fabric-up fabric-down fabric-smoke fabric-chaincode-test fabric-commission-e2e
 
 PG_CONTAINER ?= salesmesh-postgres
 PG_USER ?= salesmesh_user
@@ -17,6 +17,8 @@ help:
 	@echo "  make fabric-up   - Start the Fabric testnet (3 CAs, orderer, merchant + auditor peers, commissionchannel)"
 	@echo "  make fabric-down - Remove the Fabric testnet and its generated crypto"
 	@echo "  make fabric-smoke - Full testnet check: up, deploy, 2-org invoke, query, down"
+	@echo "  make fabric-chaincode-test - Commission chaincode unit tests (go vet, go test -race -cover)"
+	@echo "  make fabric-commission-e2e - Commission chaincode on the testnet: deploy, every function by role, upgrade, down"
 
 up:
 	docker compose -f infra/docker-compose.yml up -d
@@ -57,3 +59,9 @@ fabric-down:
 
 fabric-smoke:
 	bash blockchain/network/scripts/smoke_test.sh
+
+fabric-chaincode-test:
+	cd blockchain/chaincode && go vet ./... && go test -race -cover ./...
+
+fabric-commission-e2e:
+	bash blockchain/network/scripts/commission_e2e.sh

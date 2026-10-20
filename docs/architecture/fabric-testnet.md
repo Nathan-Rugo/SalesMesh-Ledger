@@ -4,6 +4,8 @@ A single-host, permissioned Hyperledger Fabric 2.5.16 consortium that the commis
 
 Everything runs in Docker. No Fabric binaries are installed on the host.
 
+The chaincode that runs on it, its function contract, roles and error codes are in [commission-chaincode.md](commission-chaincode.md).
+
 ## Topology
 
 ```mermaid
