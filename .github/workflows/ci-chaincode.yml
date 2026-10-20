@@ -4,16 +4,30 @@ on:
   push:
     paths:
       - 'blockchain/network/**'
+      - 'blockchain/chaincode/**'
       - '.github/workflows/ci-chaincode.yml'
   pull_request:
     paths:
       - 'blockchain/network/**'
+      - 'blockchain/chaincode/**'
       - '.github/workflows/ci-chaincode.yml'
 
 permissions:
   contents: read
 
 jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: blockchain/chaincode/go.mod
+          cache-dependency-path: blockchain/chaincode/go.sum
+      - name: Commission chaincode unit tests (vet, race, coverage)
+        run: make fabric-chaincode-test
+
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -21,3 +35,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fabric testnet smoke test (up, CCaaS deploy, 2-org invoke, query, down)
         run: make fabric-smoke
+
+  commission-e2e:
+    needs: go-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Commission chaincode e2e (deploy, every function by role, upgrade, down)
+        run: make fabric-commission-e2e

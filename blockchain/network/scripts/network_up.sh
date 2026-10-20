@@ -65,12 +65,16 @@ compose up -d orderer.$DOMAIN peer0.merchant.$DOMAIN peer0.auditor.$DOMAIN
 wait_for orderer.$DOMAIN osnadmin_cli list
 osnadmin_cli join --channelID "$CHANNEL_NAME" --config-block "/channel-artifacts/$CHANNEL_NAME.block" >/dev/null \
   || die "orderer failed to join $CHANNEL_NAME; see: docker logs orderer.$DOMAIN"
+# The orderer answers deliver with SERVICE_UNAVAILABLE until its Raft leader is elected.
+# shellcheck disable=SC2046
+wait_for orderer.$DOMAIN peer_cli merchant Admin channel fetch newest /tmp/ready.block -c "$CHANNEL_NAME" \
+  $(orderer_flags merchant Admin)
 
 for org in merchant auditor; do
   wait_for peer0.$org.$DOMAIN peer_cli $org Admin channel list
   peer_cli $org Admin channel join -b "/channel-artifacts/$CHANNEL_NAME.block" >/dev/null \
     || die "peer0.$org failed to join $CHANNEL_NAME; see: docker logs peer0.$org.$DOMAIN"
-  # joined once the peer has pulled the genesis block from the orderer
+  # joined once the peer has committed the genesis block locally
   wait_for peer0.$org.$DOMAIN peer_cli $org Admin channel getinfo -c "$CHANNEL_NAME"
 done
 

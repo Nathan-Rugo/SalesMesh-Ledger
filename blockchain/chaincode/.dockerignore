@@ -1,0 +1,6 @@
+# Only the chaincode sources reach the image: no tests, no editor or VCS files.
+*
+!go.mod
+!go.sum
+!*.go
+*_test.go
