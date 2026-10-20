@@ -32,6 +32,8 @@ export function buildRawRequest(input: RawRequestInput): { request: RiskEvaluati
       counterparty_id: input.counterpartyHash,
     },
     history: rows,
+    include_shap: true, // the admin queue explains the run that froze an escrow (spec gh-14)
+    top_k_shap: 6,
   });
   let request = make(history);
   while (history.length > 0 && Buffer.byteLength(JSON.stringify(request)) > input.maxBodyBytes) {

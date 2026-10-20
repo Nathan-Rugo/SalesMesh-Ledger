@@ -241,6 +241,42 @@ describeDb('settlement pipeline (real Postgres)', () => {
     expect(await count(db.pool, `SELECT count(*) AS n FROM verification_events WHERE kind = 'RESCORE' AND decision = 'REVIEW'`)).toBe(1);
   });
 
+  it('SHAP (spec gh-14): requested on evaluate and rescore, persisted per event; fail-safe and malformed lists store NULL', async () => {
+    await seedAgent(db.pool, 'AG042');
+    const shap = [
+      { feature: 'velocity_v_i', attribution: 1.25, value: 9 },
+      { feature: 'recipient_reuse_count', attribution: -0.4, value: 0 },
+    ];
+    const units = 'xgboost_log_odds_margin_uncalibrated';
+    const ml = mlStub((req) =>
+      req.transaction_id === 'SHAP000001'
+        ? { decision: 'QUARANTINE', top_shap_features: shap, shap_attribution_units: units }
+        : { decision: 'QUARANTINE', top_shap_features: [{ feature: 'not_a_feature', attribution: 1, value: 1 }] }
+    );
+    await enqueue('SHAP000001', 'AG042');
+    await enqueue('SHAP000002', 'AG042');
+    await drain(worker());
+    expect(ml.calls.every((c) => c.include_shap === true && c.top_k_shap === 6)).toBe(true);
+    const ev = async (receipt: string, kind = 'INITIAL') =>
+      (await db.pool.query(
+        `SELECT v.shap_features, v.shap_units, e.escrow_status FROM verification_events v JOIN transactions t USING (transaction_id)
+           JOIN escrow_accounts e USING (transaction_id) WHERE t.mpesa_receipt_id = $1 AND v.kind = $2`,
+        [receipt, kind]
+      )).rows[0];
+    expect(await ev('SHAP000001')).toEqual({ shap_features: shap, shap_units: units, escrow_status: 'QUARANTINED' });
+    // A malformed explanation is dropped; the decision still stands.
+    expect(await ev('SHAP000002')).toEqual({ shap_features: null, shap_units: null, escrow_status: 'QUARANTINED' });
+
+    // Fail-safe stores no explanation; the rescore that follows stores its own.
+    mlStub(() => 'down');
+    await enqueue('SHAP000003', 'AG042');
+    await drain(worker());
+    expect(await ev('SHAP000003')).toMatchObject({ shap_features: null, shap_units: null });
+    mlStub(() => ({ decision: 'REVIEW', top_shap_features: shap, shap_attribution_units: units }));
+    expect(await new RescoreWorker({ pool: db.pool, riskClient: new ResilientRiskClient() }).runOnce()).toBe(1);
+    expect(await ev('SHAP000003', 'RESCORE')).toEqual({ shap_features: shap, shap_units: units, escrow_status: 'QUARANTINED' });
+  });
+
   it('payload mutation → security hold QUARANTINED; self-heal never touches it', async () => {
     await seedAgent(db.pool, 'AG042');
     mlStub(() => ({ decision: 'CLEAR' }));
