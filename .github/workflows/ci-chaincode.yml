@@ -1,0 +1,23 @@
+name: Fabric Testnet CI
+
+on:
+  push:
+    paths:
+      - 'blockchain/network/**'
+      - '.github/workflows/ci-chaincode.yml'
+  pull_request:
+    paths:
+      - 'blockchain/network/**'
+      - '.github/workflows/ci-chaincode.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fabric testnet smoke test (up, CCaaS deploy, 2-org invoke, query, down)
+        run: make fabric-smoke

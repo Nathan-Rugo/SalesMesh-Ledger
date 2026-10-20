@@ -1,0 +1,184 @@
+# SalesMesh permissioned Fabric 2.5 testnet: 1 Raft orderer, MerchantOrg + AuditorOrg peers, one CA per org.
+# Drive it with scripts/network_up.sh / network_down.sh (they cd here, so bind paths stay relative).
+name: salesmesh-fabric
+
+x-ca: &ca
+  image: hyperledger/fabric-ca:${FABRIC_CA_VERSION}
+  mem_limit: 128m
+  networks: [fabric]
+  restart: unless-stopped
+
+x-peer: &peer
+  image: hyperledger/fabric-peer:${FABRIC_VERSION}
+  mem_limit: 384m
+  networks: [fabric]
+  restart: unless-stopped
+  command: peer node start
+
+x-peer-env: &peer-env
+  FABRIC_LOGGING_SPEC: INFO
+  CORE_VM_ENDPOINT: ""                        # no Docker builds: chaincode runs as a service (ccaas_builder)
+  CORE_LEDGER_STATE_STATEDATABASE: goleveldb
+  CORE_PEER_MSPCONFIGPATH: /etc/hyperledger/peer/msp
+  CORE_PEER_TLS_ENABLED: "true"
+  CORE_PEER_TLS_CERT_FILE: /etc/hyperledger/peer/tls/server.crt
+  CORE_PEER_TLS_KEY_FILE: /etc/hyperledger/peer/tls/server.key
+  CORE_PEER_TLS_ROOTCERT_FILE: /etc/hyperledger/peer/tls/ca.crt
+  CORE_PEER_TLS_CLIENTAUTHREQUIRED: "true"
+  CORE_PEER_TLS_CLIENTCERT_FILE: /etc/hyperledger/peer/tls/server.crt
+  CORE_PEER_TLS_CLIENTKEY_FILE: /etc/hyperledger/peer/tls/server.key
+  CORE_PEER_TLS_CLIENTROOTCAS_FILES: /etc/hyperledger/orgs/merchant/tlscacerts/ca.pem /etc/hyperledger/orgs/auditor/tlscacerts/ca.pem
+  CORE_PEER_GATEWAY_ENABLED: "true"
+
+services:
+  ca.orderer.salesmesh.test:
+    <<: *ca
+    container_name: ca.orderer.salesmesh.test
+    command: fabric-ca-server start -b ${CA_ADMIN_USER}:${CA_ORDERER_ADMIN_PW}
+    environment:
+      FABRIC_CA_HOME: /etc/hyperledger/fabric-ca-server
+      FABRIC_CA_SERVER_CA_NAME: ca-orderer
+      FABRIC_CA_SERVER_PORT: "9054"
+      FABRIC_CA_SERVER_TLS_ENABLED: "true"
+      FABRIC_CA_SERVER_CSR_CN: ca.orderer.salesmesh.test
+      FABRIC_CA_SERVER_CSR_HOSTS: ca.orderer.salesmesh.test,localhost
+    volumes:
+      - ./organizations/fabric-ca/orderer:/etc/hyperledger/fabric-ca-server
+
+  ca.merchant.salesmesh.test:
+    <<: *ca
+    container_name: ca.merchant.salesmesh.test
+    command: fabric-ca-server start -b ${CA_ADMIN_USER}:${CA_MERCHANT_ADMIN_PW}
+    environment:
+      FABRIC_CA_HOME: /etc/hyperledger/fabric-ca-server
+      FABRIC_CA_SERVER_CA_NAME: ca-merchant
+      FABRIC_CA_SERVER_PORT: "7054"
+      FABRIC_CA_SERVER_TLS_ENABLED: "true"
+      FABRIC_CA_SERVER_CSR_CN: ca.merchant.salesmesh.test
+      FABRIC_CA_SERVER_CSR_HOSTS: ca.merchant.salesmesh.test,localhost
+    volumes:
+      - ./organizations/fabric-ca/merchant:/etc/hyperledger/fabric-ca-server
+
+  ca.auditor.salesmesh.test:
+    <<: *ca
+    container_name: ca.auditor.salesmesh.test
+    command: fabric-ca-server start -b ${CA_ADMIN_USER}:${CA_AUDITOR_ADMIN_PW}
+    environment:
+      FABRIC_CA_HOME: /etc/hyperledger/fabric-ca-server
+      FABRIC_CA_SERVER_CA_NAME: ca-auditor
+      FABRIC_CA_SERVER_PORT: "8054"
+      FABRIC_CA_SERVER_TLS_ENABLED: "true"
+      FABRIC_CA_SERVER_CSR_CN: ca.auditor.salesmesh.test
+      FABRIC_CA_SERVER_CSR_HOSTS: ca.auditor.salesmesh.test,localhost
+    volumes:
+      - ./organizations/fabric-ca/auditor:/etc/hyperledger/fabric-ca-server
+
+  orderer.salesmesh.test:
+    image: hyperledger/fabric-orderer:${FABRIC_VERSION}
+    container_name: orderer.salesmesh.test
+    mem_limit: 256m
+    networks: [fabric]
+    restart: unless-stopped
+    command: orderer
+    environment:
+      FABRIC_LOGGING_SPEC: INFO
+      ORDERER_GENERAL_LISTENADDRESS: 0.0.0.0
+      ORDERER_GENERAL_LISTENPORT: "7050"
+      ORDERER_GENERAL_LOCALMSPID: OrdererMSP
+      ORDERER_GENERAL_LOCALMSPDIR: /var/hyperledger/orderer/msp
+      ORDERER_GENERAL_BOOTSTRAPMETHOD: none
+      ORDERER_CHANNELPARTICIPATION_ENABLED: "true"
+      ORDERER_GENERAL_TLS_ENABLED: "true"
+      ORDERER_GENERAL_TLS_PRIVATEKEY: /var/hyperledger/orderer/tls/server.key
+      ORDERER_GENERAL_TLS_CERTIFICATE: /var/hyperledger/orderer/tls/server.crt
+      ORDERER_GENERAL_TLS_ROOTCAS: "[/var/hyperledger/orderer/tls/ca.crt]"
+      ORDERER_GENERAL_TLS_CLIENTAUTHREQUIRED: "true"
+      ORDERER_GENERAL_TLS_CLIENTROOTCAS: "[/var/hyperledger/orgs/orderer/tlscacerts/ca.pem,/var/hyperledger/orgs/merchant/tlscacerts/ca.pem,/var/hyperledger/orgs/auditor/tlscacerts/ca.pem]"
+      ORDERER_GENERAL_CLUSTER_CLIENTCERTIFICATE: /var/hyperledger/orderer/tls/server.crt
+      ORDERER_GENERAL_CLUSTER_CLIENTPRIVATEKEY: /var/hyperledger/orderer/tls/server.key
+      ORDERER_GENERAL_CLUSTER_ROOTCAS: "[/var/hyperledger/orderer/tls/ca.crt]"
+      ORDERER_ADMIN_LISTENADDRESS: 0.0.0.0:7053
+      ORDERER_ADMIN_TLS_ENABLED: "true"
+      ORDERER_ADMIN_TLS_PRIVATEKEY: /var/hyperledger/orderer/tls/server.key
+      ORDERER_ADMIN_TLS_CERTIFICATE: /var/hyperledger/orderer/tls/server.crt
+      ORDERER_ADMIN_TLS_ROOTCAS: "[/var/hyperledger/orderer/tls/ca.crt]"
+      ORDERER_ADMIN_TLS_CLIENTAUTHREQUIRED: "true"
+      ORDERER_ADMIN_TLS_CLIENTROOTCAS: "[/var/hyperledger/orgs/orderer/tlscacerts/ca.pem]"
+    volumes:
+      - ./organizations/ordererOrganizations/salesmesh.test/orderers/orderer.salesmesh.test:/var/hyperledger/orderer:ro
+      - ./organizations/ordererOrganizations/salesmesh.test/msp:/var/hyperledger/orgs/orderer:ro
+      - ./organizations/peerOrganizations/merchant.salesmesh.test/msp:/var/hyperledger/orgs/merchant:ro
+      - ./organizations/peerOrganizations/auditor.salesmesh.test/msp:/var/hyperledger/orgs/auditor:ro
+      - orderer-data:/var/hyperledger/production/orderer
+
+  peer0.merchant.salesmesh.test:
+    <<: *peer
+    container_name: peer0.merchant.salesmesh.test
+    environment:
+      <<: *peer-env
+      CORE_PEER_ID: peer0.merchant.salesmesh.test
+      CORE_PEER_LOCALMSPID: MerchantMSP
+      CORE_PEER_LISTENADDRESS: 0.0.0.0:7051
+      CORE_PEER_ADDRESS: peer0.merchant.salesmesh.test:7051
+      CORE_PEER_GOSSIP_BOOTSTRAP: peer0.merchant.salesmesh.test:7051
+      CORE_PEER_GOSSIP_EXTERNALENDPOINT: peer0.merchant.salesmesh.test:7051
+    ports:
+      - "127.0.0.1:7051:7051"   # the only published port: #10 gateway connects here
+    volumes:
+      - ./organizations/peerOrganizations/merchant.salesmesh.test/peers/peer0.merchant.salesmesh.test:/etc/hyperledger/peer:ro
+      - ./organizations/peerOrganizations/merchant.salesmesh.test/msp:/etc/hyperledger/orgs/merchant:ro
+      - ./organizations/peerOrganizations/auditor.salesmesh.test/msp:/etc/hyperledger/orgs/auditor:ro
+      - peer0-merchant-data:/var/hyperledger/production
+
+  peer0.auditor.salesmesh.test:
+    <<: *peer
+    container_name: peer0.auditor.salesmesh.test
+    environment:
+      <<: *peer-env
+      CORE_PEER_ID: peer0.auditor.salesmesh.test
+      CORE_PEER_LOCALMSPID: AuditorMSP
+      CORE_PEER_LISTENADDRESS: 0.0.0.0:9051
+      CORE_PEER_ADDRESS: peer0.auditor.salesmesh.test:9051
+      CORE_PEER_GOSSIP_BOOTSTRAP: peer0.auditor.salesmesh.test:9051
+      CORE_PEER_GOSSIP_EXTERNALENDPOINT: peer0.auditor.salesmesh.test:9051
+    volumes:
+      - ./organizations/peerOrganizations/auditor.salesmesh.test/peers/peer0.auditor.salesmesh.test:/etc/hyperledger/peer:ro
+      - ./organizations/peerOrganizations/merchant.salesmesh.test/msp:/etc/hyperledger/orgs/merchant:ro
+      - ./organizations/peerOrganizations/auditor.salesmesh.test/msp:/etc/hyperledger/orgs/auditor:ro
+      - peer0-auditor-data:/var/hyperledger/production
+
+  # Admin tooling (peer, osnadmin, configtxgen, configtxlator, discover, jq, curl). Scripts `exec -T` into it.
+  cli:
+    image: hyperledger/fabric-tools:${FABRIC_VERSION}
+    container_name: cli.salesmesh.test
+    profiles: [tools]
+    mem_limit: 256m
+    networks: [fabric]
+    command: sleep infinity
+    environment:
+      FABRIC_LOGGING_SPEC: WARNING
+    volumes:
+      - ./organizations:/organizations
+      - ./configtx:/configtx:ro
+      - ./channel-artifacts:/channel-artifacts
+      - ./packages:/packages
+
+  # fabric-ca-client lives only in the CA image; scripts `run --rm -T` this to register + enroll.
+  enroller:
+    image: hyperledger/fabric-ca:${FABRIC_CA_VERSION}
+    profiles: [tools]
+    mem_limit: 128m
+    networks: [fabric]
+    entrypoint: ["bash", "/scripts/enroll.sh"]
+    volumes:
+      - ./organizations:/organizations
+      - ./scripts:/scripts:ro
+
+volumes:
+  orderer-data:
+  peer0-merchant-data:
+  peer0-auditor-data:
+
+networks:
+  fabric:
+    name: salesmesh_fabric
