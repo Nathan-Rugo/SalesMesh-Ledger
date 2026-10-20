@@ -2,7 +2,7 @@
  * @file escrow.repository.ts
  * @description SQL for the self-healing quarantine (re-score lease on escrow_accounts).
  *
- * Eligible: QUARANTINED, not security-held, latest verification event fail-safe with a
+ * Eligible: QUARANTINED, not security-held, not kept held by an admin, latest verification event fail-safe with a
  * retryable cause, attempts left, backoff elapsed, and no live re-score lease. Model-made
  * quarantines (latest event not fail-safe) and RELEASED escrows are never touched.
  */
@@ -18,6 +18,7 @@ const LATEST_EVENT = `
 
 const ELIGIBLE = `
   e.escrow_status = 'QUARANTINED' AND NOT e.security_hold
+  AND e.reviewed_at IS NULL -- an admin's "Keep held" (spec gh-14) is never undone by a rescore
   AND lv.is_fail_safe AND lv.fail_safe_cause = ANY($1::text[])`;
 
 export interface RescoreClaim {

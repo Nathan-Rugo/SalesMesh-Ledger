@@ -733,6 +733,11 @@ describe('spec gh-5 — the real app mounts auth, payments, CORS and readiness',
   it('the frozen-payout queue (spec gh-11 part 3c) is mounted: no token → 401 (not 404), SALES_AGENT → 403', async () => {
     expect((await getJson('/api/v1/admin/frozen-payouts')).status).toBe(401);
     expect(await getJson('/api/v1/admin/frozen-payouts', await tokenFor('SALES_AGENT'))).toEqual({ status: 403, body: { error: 'forbidden' } });
+    // Risk-queue overrides (spec gh-14) are mounted too.
+    const id = '0b0b0b0b-1111-4222-8333-444455556666';
+    for (const path of [`/api/v1/admin/escrows/${id}/release`, `/api/v1/admin/escrows/${id}/keep`, `/api/v1/admin/payouts/${id}/resolve`]) {
+      expect((await post(path, {})).status).toBe(401);
+    }
   });
 
   it('/health/ready → 503 degraded when Redis is down, and when Postgres is down', async () => {

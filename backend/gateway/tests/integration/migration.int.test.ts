@@ -1,10 +1,10 @@
 /**
- * Migrations 001–009 against real Postgres: legacy schema + 001 + … + 009 == fresh init schema,
+ * Migrations 001–010 against real Postgres: legacy schema + 001 + … + 010 == fresh init schema,
  * legacy rows are backfilled, and re-running (or running on a fresh install) is a no-op.
  */
 
 import type { Pool } from 'pg';
-import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006, MIGRATION_007, MIGRATION_008, MIGRATION_009, type TestDb } from './helpers';
+import { createTestDb, describeDb, INIT_SQL, LEGACY_SQL, MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006, MIGRATION_007, MIGRATION_008, MIGRATION_009, MIGRATION_010, type TestDb } from './helpers';
 
 jest.setTimeout(60_000);
 
@@ -23,7 +23,7 @@ async function shape(pool: Pool) {
   return { cols: cols.rows, idx: idx.rows, cons: consSorted, trg: trg.rows };
 }
 
-describeDb('migrations 001_settlement_pipeline … 009_frozen_sla_escalation', () => {
+describeDb('migrations 001_settlement_pipeline … 010_admin_oversight', () => {
   let legacy: TestDb;
   let fresh: TestDb;
 
@@ -164,6 +164,16 @@ describeDb('migrations 001_settlement_pipeline … 009_frozen_sla_escalation', (
     await p.query(`UPDATE escrow_accounts SET escrow_status = 'HELD', ufaa_return_id = NULL`); // the trigger exists: leaving clears the clock
     expect((await p.query(`SELECT frozen_at FROM escrow_accounts`)).rows[0].frozen_at).toBeNull();
 
+    // 010: SHAP columns stay NULL on old events (no replay); ESCROW_OVERRIDE exists; the clock clears reviewed_at.
+    await p.query(MIGRATION_010);
+    await p.query(MIGRATION_010);
+    expect((await p.query(`SELECT count(*)::int AS n FROM verification_events WHERE shap_features IS NOT NULL`)).rows[0].n).toBe(0);
+    await p.query(`INSERT INTO security_events (event_type, subject_user_id, detail) VALUES ('ESCROW_OVERRIDE', $1, 'x')`, [u.user_id]);
+    await p.query(`UPDATE escrow_accounts SET escrow_status = 'QUARANTINED'`);
+    await p.query(`UPDATE escrow_accounts SET reviewed_at = NOW()`);
+    await p.query(`UPDATE escrow_accounts SET escrow_status = 'HELD'`);
+    expect((await p.query(`SELECT reviewed_at FROM escrow_accounts`)).rows[0].reviewed_at).toBeNull();
+
     const [a1, b1] = await Promise.all([shape(legacy.pool), shape(fresh.pool)]);
     expect(a1.cols).toEqual(b1.cols);
     expect(a1.idx).toEqual(b1.idx);
@@ -182,6 +192,7 @@ describeDb('migrations 001_settlement_pipeline … 009_frozen_sla_escalation', (
     await legacy.pool.query(MIGRATION_007);
     await legacy.pool.query(MIGRATION_008);
     await legacy.pool.query(MIGRATION_009);
+    await legacy.pool.query(MIGRATION_010);
     expect(await shape(legacy.pool)).toEqual(before);
 
     const freshBefore = await shape(fresh.pool);
@@ -194,9 +205,10 @@ describeDb('migrations 001_settlement_pipeline … 009_frozen_sla_escalation', (
     await fresh.pool.query(MIGRATION_007);
     await fresh.pool.query(MIGRATION_008);
     await fresh.pool.query(MIGRATION_009);
+    await fresh.pool.query(MIGRATION_010);
     expect(await shape(fresh.pool)).toEqual(freshBefore);
     const { rows } = await fresh.pool.query(`SELECT version FROM schema_migrations ORDER BY version`);
-    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation', '003_reconciliation', '004_trust_scores', '005_payout_destinations', '006_payout_claims', '007_unclaimed_reminders', '008_ufaa_remittance', '009_frozen_sla_escalation']);
+    expect(rows.map((r) => r.version)).toEqual(['001_settlement_pipeline', '002_auth_stk_initiation', '003_reconciliation', '004_trust_scores', '005_payout_destinations', '006_payout_claims', '007_unclaimed_reminders', '008_ufaa_remittance', '009_frozen_sla_escalation', '010_admin_oversight']);
   });
 
   it('enforces the agent_code CHECK (upper-case, trimmed)', async () => {

@@ -51,7 +51,7 @@ Dependency rule: domain imports nothing from data, presentation, React or Next (
 `no-restricted-imports` on `src/**/domain/**`). Data implements domain interfaces. Presentation calls
 use cases through the composition root (`getContainer()`; components read it from `useSession().container`, which tests inject). Use cases return `Result`; nothing throws across layers.
 
-`features/agent-ledger` (#13): balance slip, accrual timeline with hold countdowns, claim flow (Fuliza disclosure, PIN), payout-line verification and payout history over `/api/v1/payouts` and `/api/v1/payout-destinations`, refreshed by visibility-aware polling (15 s while visible; on focus, `online` and hold maturity). `features/admin-oversight` (#14) ships only nav config and an empty state.
+`features/agent-ledger` (#13): balance slip, accrual timeline with hold countdowns, claim flow (Fuliza disclosure, PIN), payout-line verification and payout history over `/api/v1/payouts` and `/api/v1/payout-destinations`, refreshed by visibility-aware polling (15 s while visible; on focus, `online` and hold maturity). `features/admin-oversight` (#14): the risk queue over `/api/v1/admin` (frozen commission overdue first, a SHAP waterfall of the run that froze each item, release / keep held and unconfirmed-payout resolve with a reason note and the admin's PIN), and the `/admin` totals; same polling and error states as the ledger. The agents directory is still an empty state.
 
 ### Auth
 

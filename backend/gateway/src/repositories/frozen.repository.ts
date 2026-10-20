@@ -5,7 +5,8 @@
  * (kept by the escrow_accounts_freeze_clock trigger) and payouts.unresolved_at.
  */
 
-import type { Db } from './db.types';
+import type { ShapFeature } from '../services/risk_client.service';
+import { withTransaction, type Db, type TxDb } from './db.types';
 
 export interface SlaHours {
   escrowHours: number;
@@ -30,7 +31,22 @@ export interface FrozenEscrow {
   receipt: string;
   frozenAt: Date;
   escalatedAt: Date | null;
+  /** An admin chose "Keep held" in this spell (spec gh-14); clears the overdue flag. */
+  reviewedAt: Date | null;
   overdue: boolean;
+  /** The latest verification event: the model run behind this quarantine (null when none). */
+  risk: FrozenRisk | null;
+}
+
+export interface FrozenRisk {
+  decision: string;
+  isoScore: number | null;
+  xgbProb: number | null;
+  modelVersion: string;
+  /** That run's SHAP attributions, only when XGBoost (layer 2) made the quarantining decision: null before
+   * migration 010, on fail-safe, for security holds, trust freezes and layer-1 (Isolation Forest) quarantines. */
+  shap: ShapFeature[] | null;
+  units: string | null;
 }
 
 export interface FrozenPayout {
@@ -69,24 +85,40 @@ export async function escalateOverdue(db: Db, q: SlaHours): Promise<Escalated> {
 export async function listFrozen(
   db: Db,
   q: SlaHours & { limit: number }
-): Promise<{ escrows: FrozenEscrow[]; payouts: FrozenPayout[]; totals: { escrows: number; payouts: number } }> {
+): Promise<{
+  escrows: FrozenEscrow[];
+  payouts: FrozenPayout[];
+  totals: { escrows: number; payouts: number };
+  overdue: { escrows: number; payouts: number };
+}> {
+  const escrowOverdue = `COALESCE(e.frozen_at <= NOW() - make_interval(hours => $1::int) AND e.reviewed_at IS NULL, FALSE)`;
+  const modelFroze = `(NOT e.security_hold AND e.quarantine_reason = 'model_decision' AND v.layer2_adjudicated IS TRUE)`;
+  const payoutOverdue = `COALESCE(p.unresolved_at <= NOW() - make_interval(hours => $1::int), FALSE)`;
   const [e, p] = await Promise.all([
     db.query(
       `SELECT e.escrow_id, a.agent_code, u.full_name, (e.gross_commission * 100)::bigint AS cents, e.quarantine_reason, e.security_hold,
-              e.ufaa_return_id IS NOT NULL AS ufaa_frozen, t.mpesa_receipt_id, e.frozen_at, e.sla_escalated_at,
-              COALESCE(e.frozen_at <= NOW() - make_interval(hours => $1::int), FALSE) AS overdue, count(*) OVER ()::int AS total
+              e.ufaa_return_id IS NOT NULL AS ufaa_frozen, t.mpesa_receipt_id, e.frozen_at, e.sla_escalated_at, e.reviewed_at,
+              ${escrowOverdue} AS overdue, count(*) OVER ()::int AS total, (count(*) FILTER (WHERE ${escrowOverdue}) OVER ())::int AS total_overdue,
+              v.decision, v.isolation_forest_score, v.xgboost_fraud_prob, v.model_version,
+              -- SHAP explains the freeze only when XGBoost (layer 2) made the quarantining decision.
+              CASE WHEN ${modelFroze} THEN v.shap_features END AS shap_features, CASE WHEN ${modelFroze} THEN v.shap_units END AS shap_units
          FROM escrow_accounts e
          JOIN transactions t USING (transaction_id)
          JOIN sales_agents a ON a.agent_id = t.agent_id
          JOIN users u ON u.user_id = a.user_id
+         -- The run behind the quarantine: same ordering as the self-heal's latest event.
+         LEFT JOIN LATERAL (
+           SELECT v.decision, v.isolation_forest_score, v.xgboost_fraud_prob, v.model_version, v.shap_features, v.shap_units, v.layer2_adjudicated
+             FROM verification_events v WHERE v.transaction_id = e.transaction_id
+            ORDER BY v.evaluated_at DESC, (v.kind = 'RESCORE') DESC, v.verification_id DESC LIMIT 1) v ON TRUE
         WHERE e.escrow_status = 'QUARANTINED'
-        ORDER BY overdue DESC, e.frozen_at NULLS LAST, e.escrow_id
+        ORDER BY overdue DESC, (e.reviewed_at IS NULL) DESC, e.frozen_at NULLS LAST, e.escrow_id
         LIMIT $2`,
       [q.escrowHours, q.limit]
     ),
     db.query(
       `SELECT p.payout_id, a.agent_code, u.full_name, p.amount, p.msisdn, p.unresolved_at, p.sla_escalated_at,
-              COALESCE(p.unresolved_at <= NOW() - make_interval(hours => $1::int), FALSE) AS overdue, count(*) OVER ()::int AS total
+              ${payoutOverdue} AS overdue, count(*) OVER ()::int AS total, (count(*) FILTER (WHERE ${payoutOverdue}) OVER ())::int AS total_overdue
          FROM payouts p
          JOIN sales_agents a ON a.agent_id = p.agent_id
          JOIN users u ON u.user_id = a.user_id
@@ -108,7 +140,18 @@ export async function listFrozen(
       receipt: r.mpesa_receipt_id,
       frozenAt: r.frozen_at,
       escalatedAt: r.sla_escalated_at,
+      reviewedAt: r.reviewed_at,
       overdue: r.overdue,
+      risk: r.decision
+        ? {
+            decision: r.decision,
+            isoScore: r.isolation_forest_score,
+            xgbProb: r.xgboost_fraud_prob,
+            modelVersion: r.model_version,
+            shap: r.shap_features,
+            units: r.shap_features ? r.shap_units : null,
+          }
+        : null,
     })),
     payouts: p.rows.map((r) => ({
       payoutId: r.payout_id,
@@ -121,7 +164,78 @@ export async function listFrozen(
       overdue: r.overdue,
     })),
     totals: { escrows: e.rows[0]?.total ?? 0, payouts: p.rows[0]?.total ?? 0 },
+    overdue: { escrows: e.rows[0]?.total_overdue ?? 0, payouts: p.rows[0]?.total_overdue ?? 0 },
   };
+}
+
+export type EscrowOverride = 'release' | 'keep';
+
+export type OverrideResult =
+  | { kind: 'not_found' }
+  | { kind: 'security_hold' }
+  /** No longer QUARANTINED (released, or promoted by the rescore), or already kept in this spell. */
+  | { kind: 'already_decided'; status: string }
+  | { kind: 'done'; status: 'HELD' | 'QUARANTINED'; receipt: string; releaseDueAt: Date; reviewedAt: Date | null };
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * An admin override of a QUARANTINED escrow (spec gh-14), state-guarded on the locked row and
+ * committed with its ESCROW_OVERRIDE audit row (subject: the admin), so a double submit or a second
+ * admin gets `already_decided` and exactly one row exists. Never moves money:
+ *   release: QUARANTINED -> HELD, release_due_at = max(original, now), reason and rescore lease cleared
+ *            (the normal claim path takes over);
+ *   keep:    records the review and clears this spell's overdue flag (marks it escalated); stays queued.
+ * Security holds are refused (they need an investigation, not an override).
+ */
+export async function overrideEscrow(
+  db: TxDb,
+  q: { escrowId: string; action: EscrowOverride; adminId: string; note: string }
+): Promise<OverrideResult> {
+  if (!UUID_RE.test(q.escrowId)) return { kind: 'not_found' };
+  return withTransaction(db, async (tx) => {
+    const { rows: [cur] } = await tx.query(
+      `SELECT e.escrow_status, e.security_hold, e.reviewed_at, e.frozen_at, t.mpesa_receipt_id, (e.gross_commission * 100)::bigint AS cents
+         FROM escrow_accounts e JOIN transactions t USING (transaction_id)
+        WHERE e.escrow_id = $1 FOR UPDATE OF e`,
+      [q.escrowId]
+    );
+    if (!cur) return { kind: 'not_found' } as const;
+    if (cur.escrow_status !== 'QUARANTINED') return { kind: 'already_decided', status: cur.escrow_status } as const;
+    if (cur.security_hold) return { kind: 'security_hold' } as const;
+    if (q.action === 'keep' && cur.reviewed_at) return { kind: 'already_decided', status: cur.escrow_status } as const;
+    const { rows: [upd] } =
+      q.action === 'release'
+        ? await tx.query(
+            `UPDATE escrow_accounts
+                SET escrow_status = 'HELD', release_due_at = GREATEST(release_due_at, NOW()), quarantine_reason = NULL,
+                    rescore_claimed_at = NULL, rescore_claim_token = NULL
+              WHERE escrow_id = $1 AND escrow_status = 'QUARANTINED' AND NOT security_hold
+              RETURNING escrow_status, release_due_at, reviewed_at`,
+            [q.escrowId]
+          )
+        : await tx.query(
+            `UPDATE escrow_accounts SET reviewed_at = NOW(), sla_escalated_at = COALESCE(sla_escalated_at, NOW())
+              WHERE escrow_id = $1 AND escrow_status = 'QUARANTINED' AND NOT security_hold AND reviewed_at IS NULL
+              RETURNING escrow_status, release_due_at, reviewed_at`,
+            [q.escrowId]
+          );
+    if (!upd) throw new Error(`guarded override matched no row: ${q.escrowId}`); // the row is locked above
+    const kes = (Number(cur.cents) / 100).toFixed(2);
+    const what = q.action === 'release' ? `released to HELD (due ${upd.release_due_at.toISOString()})` : 'kept held after review';
+    // incoming_hash = action + spell: the dedup constraint backs the row-lock guard (one row per decision).
+    await tx.query(
+      `INSERT INTO security_events (event_type, mpesa_receipt_id, subject_user_id, incoming_hash, detail)
+       VALUES ('ESCROW_OVERRIDE', $1, $2, $3, $4)`,
+      [
+        cur.mpesa_receipt_id,
+        q.adminId,
+        `${q.action}:${cur.frozen_at?.toISOString() ?? ''}`,
+        `escrow ${q.escrowId} (receipt ${cur.mpesa_receipt_id}, KES ${kes}): ${what} by admin ${q.adminId}. Note: ${q.note}`.slice(0, 2000),
+      ]
+    );
+    return { kind: 'done', status: upd.escrow_status, receipt: cur.mpesa_receipt_id, releaseDueAt: upd.release_due_at, reviewedAt: upd.reviewed_at } as const;
+  });
 }
 
 /** Login phones of the active (not disabled) MERCHANT_ADMINs. */
