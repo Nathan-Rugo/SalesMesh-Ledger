@@ -11,14 +11,30 @@
  */
 
 import pool from '../config/db';
+import { AuthService, type ClientInfo, type PinConfirmResult } from '../auth/auth.service';
 import { frozenSlaConfig, type FrozenSlaConfig } from '../domain/payout';
-import type { Db } from '../repositories/db.types';
-import { activeAdminPhones, escalateOverdue, listFrozen, type Escalated } from '../repositories/frozen.repository';
+import type { TxDb } from '../repositories/db.types';
+import {
+  activeAdminPhones,
+  escalateOverdue,
+  listFrozen,
+  overrideEscrow,
+  type Escalated,
+  type EscrowOverride,
+  type OverrideResult,
+} from '../repositories/frozen.repository';
 import { metrics as defaultMetrics, type GatewayMetrics } from './metrics.service';
 import { notifierFromEnv, notifySafely, type Notifier } from './notifier.service';
+import { PayoutService } from './payout.service';
+
+type PinFailure = Exclude<PinConfirmResult, { kind: 'ok' }>;
 
 export interface FrozenDeps {
-  db?: Db;
+  db?: TxDb;
+  /** The admin's PIN confirmation for overrides (spec gh-14). */
+  auth?: Pick<AuthService, 'confirmPin'>;
+  /** Resolves UNRESOLVED payouts (the payout:resolve CLI's path). */
+  payouts?: Pick<PayoutService, 'adminResolve'>;
   notifier?: Notifier;
   metrics?: GatewayMetrics;
   /** Overrides of PAYOUT_REMINDER_HOURS / *_SLA_HOURS (tests). */
@@ -41,18 +57,30 @@ export function digest(x: Escalated): string {
 }
 
 export class FrozenPayoutService {
-  private readonly db: Db;
+  private readonly db: TxDb;
   private readonly notifier: Notifier;
   private readonly metrics: GatewayMetrics;
   private readonly overrides: Partial<FrozenSlaConfig>;
   private readonly inflightAlerts = new Set<Promise<unknown>>();
   private lastRun = -Infinity;
+  private authDep: Pick<AuthService, 'confirmPin'> | undefined;
+  private payoutsDep: Pick<PayoutService, 'adminResolve'> | undefined;
 
   constructor(deps: FrozenDeps = {}) {
     this.db = deps.db ?? pool;
     this.notifier = deps.notifier ?? notifierFromEnv();
     this.metrics = deps.metrics ?? defaultMetrics;
     this.overrides = deps.config ?? {};
+    this.authDep = deps.auth;
+    this.payoutsDep = deps.payouts;
+  }
+
+  // Built on first use: the SLA sweep (worker) never needs them.
+  private get auth(): Pick<AuthService, 'confirmPin'> {
+    return (this.authDep ??= new AuthService({ db: this.db }));
+  }
+  private get payouts(): Pick<PayoutService, 'adminResolve'> {
+    return (this.payoutsDep ??= new PayoutService({ db: this.db, auth: this.auth, metrics: this.metrics }));
   }
 
   config(): FrozenSlaConfig {
@@ -102,6 +130,42 @@ export class FrozenPayoutService {
   async list() {
     const sla = this.sla();
     return { sla, ...(await listFrozen(this.db, { ...sla, limit: FROZEN_LIST_LIMIT })) };
+  }
+
+  /**
+   * POST /api/v1/admin/escrows/:id/{release,keep}: the admin's PIN (a wrong one spends a throttled
+   * attempt), then the guarded override with its audit row. The note is validated by the caller.
+   */
+  async overrideEscrow(
+    adminId: string,
+    escrowId: string,
+    action: EscrowOverride,
+    pin: unknown,
+    note: string,
+    client: ClientInfo
+  ): Promise<PinFailure | OverrideResult> {
+    const confirmed = await this.auth.confirmPin(adminId, pin, client);
+    if (confirmed.kind !== 'ok') return confirmed;
+    const r = await overrideEscrow(this.db, { escrowId, action, adminId, note });
+    if (r.kind === 'done') console.info(`[AdminQueue] escrow ${escrowId} (${r.receipt}): ${action} by admin ${adminId}`);
+    return r;
+  }
+
+  /**
+   * POST /api/v1/admin/payouts/:id/resolve: the payout:resolve CLI's path (PAID with the M-Pesa receipt,
+   * or FAILED), with the admin's user id and note as the operator in PAYOUT_STATUS_CHANGED. Never sends money.
+   */
+  async resolvePayout(
+    adminId: string,
+    payoutId: string,
+    o: { paid: true; receipt: string } | { paid: false },
+    pin: unknown,
+    note: string,
+    client: ClientInfo
+  ) {
+    const confirmed = await this.auth.confirmPin(adminId, pin, client);
+    if (confirmed.kind !== 'ok') return confirmed;
+    return this.payouts.adminResolve(payoutId, o, `${adminId}, note: ${note}`);
   }
 
   /** Waits for the digests still being sent (tests, shutdown). */

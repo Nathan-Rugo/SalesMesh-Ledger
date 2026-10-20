@@ -89,3 +89,61 @@ export const lineView = (o: Record<string, unknown> = {}) => ({
   created_at: '2026-10-14T08:00:00.000Z',
   ...o,
 });
+
+/** A frozen escrow row of GET /api/v1/admin/frozen-payouts (admin.controller.ts, gh-14). */
+export const frozenEscrowView = (o: Record<string, unknown> = {}) => ({
+  escrow_id: 'e-1',
+  agent_code: 'AG042',
+  agent_name: 'Wanjiru Kamau',
+  amount: 425.5,
+  quarantine_reason: 'model_decision',
+  security_hold: false,
+  ufaa_frozen: false,
+  receipt: 'SGH12ABC34',
+  frozen_at: new Date(Date.now() - 80 * 3600_000).toISOString(),
+  escalated_at: null,
+  reviewed_at: null,
+  overdue: true,
+  risk: {
+    decision: 'QUARANTINE',
+    iso_score: 0.71,
+    xgb_prob: 0.93,
+    model_version: 'v1.0.0',
+    shap: [
+      { feature: 'velocity_v_i', attribution: 1.4, value: 12 },
+      { feature: 'split_ratio_r_s', attribution: 0.6, value: 0.5 },
+      { feature: 'recipient_reuse_count', attribution: -0.3, value: 0 },
+    ],
+    units: 'xgboost_log_odds_margin_uncalibrated',
+  },
+  ...o,
+});
+
+/** An UNRESOLVED payout row of GET /api/v1/admin/frozen-payouts. */
+export const unresolvedPayoutView = (o: Record<string, unknown> = {}) => ({
+  payout_id: 'p-9',
+  agent_code: 'AG042',
+  agent_name: 'Wanjiru Kamau',
+  amount: 1500,
+  msisdn: '2547******78',
+  unresolved_at: new Date(Date.now() - 30 * 3600_000).toISOString(),
+  escalated_at: null,
+  overdue: true,
+  ...o,
+});
+
+/** GET /api/v1/admin/frozen-payouts body; totals / overdue default to the lists' sizes. */
+export const queueBody = (o: { escrows?: unknown[]; payouts?: unknown[] } & Record<string, unknown> = {}) => {
+  const escrows = o.escrows ?? [];
+  const payouts = o.payouts ?? [];
+  const overdue = (xs: unknown[]) => xs.filter((x) => (x as { overdue?: boolean }).overdue).length;
+  return {
+    sla: { escrow_hours: 72, payout_hours: 24 },
+    totals: { escrows: escrows.length, payouts: payouts.length },
+    overdue: { escrows: overdue(escrows), payouts: overdue(payouts) },
+    total_available: escrows.length + payouts.length,
+    ...o,
+    escrows,
+    payouts,
+  };
+};

@@ -11,7 +11,8 @@
  *   (/api/v1/payouts), both with PAYOUTS_ENABLED=true.
  *   Health: /health/live and /health/ready are minimal unauthenticated probes;
  *   /health/details (MERCHANT_ADMIN) reports queue, ML, login, STK and Daraja metrics;
- *   /api/v1/admin/frozen-payouts (MERCHANT_ADMIN) lists frozen commission, overdue first.
+ *   /api/v1/admin/frozen-payouts (MERCHANT_ADMIN) lists frozen commission, overdue first, with the
+ *   model's SHAP reasons; /api/v1/admin/{escrows,payouts}/:id/... are the PIN-confirmed overrides (#14).
  *
  * Settlement happens in background workers draining the durable intake queue
  * (settlement worker) and self-healing fail-safe quarantines (re-score worker). With
@@ -278,7 +279,7 @@ process.on('uncaughtException', (err) => {
 });
 
 // ── Start Listener ────────────────────────────────────────────────────
-export const REQUIRED_MIGRATION = '009_frozen_sla_escalation';
+export const REQUIRED_MIGRATION = '010_admin_oversight';
 
 /**
  * Startup gates, without side effects: `fatal` problems refuse the start, `warnings` are logged.

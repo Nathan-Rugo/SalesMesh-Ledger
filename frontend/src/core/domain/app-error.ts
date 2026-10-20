@@ -28,6 +28,11 @@ export const PAYOUT_REFUSALS = [
 export type PayoutRefusal = (typeof PAYOUT_REFUSALS)[number];
 export const isPayoutRefusal = (v: unknown): v is PayoutRefusal => typeof v === 'string' && (PAYOUT_REFUSALS as readonly string[]).includes(v);
 
+/** Gateway refusals of an admin override (gh-14), read from the response body; `invalid_note` is also checked locally. */
+export const OVERRIDE_REFUSALS = ['already_decided', 'security_hold', 'not_unresolved', 'not_found', 'invalid_note'] as const;
+export type OverrideRefusal = (typeof OVERRIDE_REFUSALS)[number];
+export const isOverrideRefusal = (v: unknown): v is OverrideRefusal => typeof v === 'string' && (OVERRIDE_REFUSALS as readonly string[]).includes(v);
+
 export type AppError =
   | { readonly kind: 'invalid_credentials' }
   | { readonly kind: 'throttled'; readonly retryAfterS: number | null }
@@ -40,6 +45,7 @@ export type AppError =
   | { readonly kind: 'forbidden' }
   | { readonly kind: 'invalid_request' }
   | { readonly kind: 'payout_refused'; readonly code: PayoutRefusal }
+  | { readonly kind: 'override_refused'; readonly code: OverrideRefusal }
   | { readonly kind: 'unexpected'; readonly status?: number };
 
 /** Stable, user-facing copy for an error (no enumeration hints). */
@@ -67,6 +73,8 @@ export function errorMessage(e: AppError): string {
       return 'That request was not accepted. Check the details and try again.';
     case 'payout_refused':
       return payoutRefusalMessage(e.code);
+    case 'override_refused':
+      return overrideRefusalMessage(e.code);
     case 'unexpected':
       return 'Something went wrong. Try again.';
   }
@@ -103,6 +111,22 @@ export function payoutRefusalMessage(code: PayoutRefusal): string {
       return 'Your registered number can’t receive M-Pesa payouts. Ask your merchant to update it.';
     case 'verification_failed':
       return 'M-Pesa refused the verification payment. Check your line is active, then try again.';
+  }
+}
+
+/** What a refused admin override means. */
+export function overrideRefusalMessage(code: OverrideRefusal): string {
+  switch (code) {
+    case 'already_decided':
+      return 'Already decided: another admin acted on it, or it cleared on its own. The queue is up to date.';
+    case 'security_hold':
+      return 'This one is on a security hold. It needs an investigation, not an override.';
+    case 'not_unresolved':
+      return 'This payout is no longer waiting: it was already resolved. The queue is up to date.';
+    case 'not_found':
+      return 'This item is no longer in the queue.';
+    case 'invalid_note':
+      return 'Write a reason between 10 and 280 characters.';
   }
 }
 

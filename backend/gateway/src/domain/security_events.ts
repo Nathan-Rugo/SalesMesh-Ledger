@@ -29,7 +29,9 @@ export type SecurityEventType =
   // UFAA return (spec gh-11, part 3b): one per agent per step (notice, report, remit)
   | 'UFAA_NOTICE_SENT'
   | 'UFAA_REPORTED'
-  | 'UFAA_REMITTED';
+  | 'UFAA_REMITTED'
+  // Admin risk queue (spec gh-14): an admin released or kept a QUARANTINED escrow
+  | 'ESCROW_OVERRIDE';
 
 /**
  * Receipt events that put the receipt's escrow on security hold (QUARANTINED, never self-healed),

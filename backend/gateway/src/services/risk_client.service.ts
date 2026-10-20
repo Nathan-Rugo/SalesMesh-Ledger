@@ -30,6 +30,7 @@ export interface RiskEvaluationRequest {
   transaction: RawTransaction;
   history: HistoryRow[];
   include_shap?: boolean;
+  top_k_shap?: number; // 1..6
 }
 
 export type RiskDecisionValue = 'CLEAR' | 'QUARANTINE' | 'REVIEW';
@@ -82,6 +83,28 @@ export interface RiskEvaluationResponse {
   fail_safe_cause: FailSafeCause | null;
   /** Required on a model response (contract); null on fail-safe. */
   feature_vector: FeatureVector | null;
+  /** SHAP attributions of this run (top by |attribution|); null on fail-safe or when absent/malformed. */
+  top_shap_features?: ShapFeature[] | null;
+  /** Units of `attribution` (ml-engine: uncalibrated XGBoost log-odds margin). */
+  shap_units?: string | null;
+}
+
+/** ml-engine ShapFeature: one feature's signed contribution to the raw XGBoost margin. */
+export interface ShapFeature {
+  feature: keyof FeatureVector;
+  attribution: number;
+  value: number;
+}
+
+/** The SHAP list, or null: an explanation is advisory, so a malformed one is dropped, never fails the decision. */
+function parseShap(v: unknown): ShapFeature[] | null {
+  if (!Array.isArray(v) || v.length === 0 || v.length > FEATURE_NAMES.length) return null;
+  const ok = v.every((s: Partial<ShapFeature> | null) =>
+    typeof s === 'object' && s !== null &&
+    (FEATURE_NAMES as readonly unknown[]).includes(s.feature) &&
+    Number.isFinite(s.attribution) && Number.isFinite(s.value)
+  );
+  return ok ? (v as ShapFeature[]).map((s) => ({ feature: s.feature, attribution: s.attribution, value: s.value })) : null;
 }
 
 const DECISIONS: ReadonlySet<string> = new Set(['CLEAR', 'QUARANTINE', 'REVIEW']);
@@ -118,6 +141,8 @@ function parseResponse(body: unknown, transactionId: string): RiskEvaluationResp
     is_fail_safe: false,
     fail_safe_cause: null,
     feature_vector: featureVector,
+    top_shap_features: parseShap(b.top_shap_features),
+    shap_units: typeof b.shap_attribution_units === 'string' && b.shap_attribution_units ? b.shap_attribution_units.slice(0, 64) : null,
   };
 }
 

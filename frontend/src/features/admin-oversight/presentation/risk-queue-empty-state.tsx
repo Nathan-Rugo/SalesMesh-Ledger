@@ -1,7 +1,7 @@
 import { ReceiptEmpty } from '@/shared/presentation/ui/receipt';
 import { StatusPill } from '@/shared/presentation/ui/status-pill';
 
-/** Risk queue before it is wired to the gateway (#14). Says what will appear and when; claims no count. */
+/** Empty risk queue (#14): nothing frozen and no unconfirmed payout. Says what will appear and when. */
 export function RiskQueueEmptyState() {
   return (
     <ReceiptEmpty eyebrow="Risk queue" icon="queue" title="Held payouts will queue here">

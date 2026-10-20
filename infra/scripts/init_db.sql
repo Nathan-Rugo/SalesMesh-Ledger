@@ -240,7 +240,8 @@ CREATE TABLE IF NOT EXISTS security_events (
         'RECONCILE_AMOUNT_MISMATCH', 'PAYMENT_REVERSED', 'RECONCILED_CALLBACK_LATE',
         'RECONCILE_ATTRIBUTION_CONFLICT', 'RECONCILE_NOT_ON_STATEMENT', 'STK_STATUS_CONFLICT',
         'PAYOUT_DESTINATION_CHANGED', 'PAYOUT_STATUS_CHANGED', 'PAYOUT_NAME_MISMATCH',
-        'UFAA_NOTICE_SENT', 'UFAA_REPORTED', 'UFAA_REMITTED')),
+        'UFAA_NOTICE_SENT', 'UFAA_REPORTED', 'UFAA_REMITTED',
+        'ESCROW_OVERRIDE')),
     mpesa_receipt_id VARCHAR(50),
     subject_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
     family_id UUID,
@@ -294,6 +295,10 @@ CREATE TABLE IF NOT EXISTS verification_events (
     history_truncated BOOLEAN NOT NULL DEFAULT FALSE,
     history_receipts TEXT[],                         -- receipts actually sent (exact re-score replay)
     reason TEXT,
+    -- SHAP attributions of this run (spec gh-14): [{feature, attribution, value}], ml-engine's top 6;
+    -- NULL on fail-safe and on events recorded before migration 010.
+    shap_features JSONB,
+    shap_units VARCHAR(64),
     kind VARCHAR(10) NOT NULL DEFAULT 'INITIAL' CHECK (kind IN ('INITIAL', 'RESCORE')),
     evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -482,6 +487,8 @@ CREATE TABLE IF NOT EXISTS escrow_accounts (
     -- QUARANTINED spell began, and when its SLA breach was escalated to admins (once per spell).
     frozen_at TIMESTAMPTZ,
     sla_escalated_at TIMESTAMPTZ,
+    -- Admin risk queue (spec gh-14): an admin chose "Keep held" in this spell (cleared with the spell).
+    reviewed_at TIMESTAMPTZ,
     CONSTRAINT escrow_accounts_claimed_payout CHECK (escrow_status <> 'CLAIMED' OR payout_id IS NOT NULL),
     CONSTRAINT escrow_accounts_remitted_return CHECK (escrow_status <> 'REMITTED' OR ufaa_return_id IS NOT NULL)
 );
@@ -497,17 +504,19 @@ CREATE INDEX IF NOT EXISTS escrow_accounts_frozen_idx ON escrow_accounts (frozen
 
 -- The freeze clock, generic on INSERT or UPDATE OF escrow_status, so it covers every writer (settle insert,
 -- security hold, payout failure, importer reversal, rescore promote, and future ones): entering QUARANTINED
--- starts a new spell (frozen_at, escalation cleared); leaving clears both.
+-- starts a new spell (frozen_at, escalation and admin review cleared); leaving clears them.
 CREATE OR REPLACE FUNCTION escrow_accounts_freeze_clock() RETURNS trigger LANGUAGE plpgsql AS $fn$
 BEGIN
     IF NEW.escrow_status = 'QUARANTINED' THEN
         IF TG_OP = 'INSERT' OR OLD.escrow_status IS DISTINCT FROM 'QUARANTINED' THEN
             NEW.frozen_at := NOW();
             NEW.sla_escalated_at := NULL;
+            NEW.reviewed_at := NULL;
         END IF;
     ELSE
         NEW.frozen_at := NULL;
         NEW.sla_escalated_at := NULL;
+        NEW.reviewed_at := NULL;
     END IF;
     RETURN NEW;
 END
@@ -566,5 +575,5 @@ CREATE TABLE IF NOT EXISTS tax_deductions (
 INSERT INTO schema_migrations (version) VALUES ('001_settlement_pipeline'), ('002_auth_stk_initiation'), ('003_reconciliation'),
                                                ('004_trust_scores'), ('005_payout_destinations'), ('006_payout_claims'),
                                                ('007_unclaimed_reminders'), ('008_ufaa_remittance'),
-                                               ('009_frozen_sla_escalation')
+                                               ('009_frozen_sla_escalation'), ('010_admin_oversight')
     ON CONFLICT (version) DO NOTHING;

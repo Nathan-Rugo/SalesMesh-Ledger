@@ -144,7 +144,8 @@ export class EscrowService {
 
   /**
    * Appends a verification event (Table 6) with the full audit record: decision, layer-2 flag,
-   * model digest, raw float scores (NULL on fail-safe) and the fail-safe cause. INITIAL is
+   * model digest, raw float scores (NULL on fail-safe), the fail-safe cause and the run's SHAP
+   * attributions (spec gh-14; NULL on fail-safe). INITIAL is
    * idempotent per transaction (partial unique index); RESCOREs append.
    *
    * @returns the verification id, or null when the INITIAL event already exists.
@@ -171,11 +172,13 @@ export class EscrowService {
       historyTruncated,
       risk.reason.slice(0, 1000),
       historyReceipts,
+      risk.top_shap_features ? JSON.stringify(risk.top_shap_features) : null,
+      risk.top_shap_features ? (risk.shap_units ?? null) : null,
     ];
     const columns = `(transaction_id, is_deduplicated, isolation_forest_score, xgboost_fraud_prob, model_version,
                       decision, layer2_adjudicated, model_sha256, triggered_layer, is_fail_safe, fail_safe_cause,
-                      history_truncated, reason, history_receipts, kind)`;
-    const select = `($1, TRUE, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::text[]`;
+                      history_truncated, reason, history_receipts, shap_features, shap_units, kind)`;
+    const select = `($1, TRUE, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::text[], $14::jsonb, $15`;
     const { rows } =
       kind === 'INITIAL'
         ? await db.query<{ verification_id: string }>(
