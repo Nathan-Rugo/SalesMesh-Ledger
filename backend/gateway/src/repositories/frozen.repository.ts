@@ -7,6 +7,7 @@
 
 import type { ShapFeature } from '../services/risk_client.service';
 import { withTransaction, type Db, type TxDb } from './db.types';
+import { enqueueRelease } from './ledger.repository';
 
 export interface SlaHours {
   escrowHours: number;
@@ -186,7 +187,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *   release: QUARANTINED -> HELD, release_due_at = max(original, now), reason and rescore lease cleared
  *            (the normal claim path takes over);
  *   keep:    records the review and clears this spell's overdue flag (marks it escalated); stays queued.
- * Security holds are refused (they need an investigation, not an override).
+ * Security holds are refused (they need an investigation, not an override). A release queues the
+ * ledger ReleaseEscrow (`admin_release`, the new due date) in the same transaction.
  */
 export async function overrideEscrow(
   db: TxDb,
@@ -221,6 +223,7 @@ export async function overrideEscrow(
             [q.escrowId]
           );
     if (!upd) throw new Error(`guarded override matched no row: ${q.escrowId}`); // the row is locked above
+    if (q.action === 'release') await enqueueRelease(tx, q.escrowId, 'admin_release', new Date(upd.release_due_at));
     const kes = (Number(cur.cents) / 100).toFixed(2);
     const what = q.action === 'release' ? `released to HELD (due ${upd.release_due_at.toISOString()})` : 'kept held after review';
     // incoming_hash = action + spell: the dedup constraint backs the row-lock guard (one row per decision).

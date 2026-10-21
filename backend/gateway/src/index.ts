@@ -17,7 +17,9 @@
  * Settlement happens in background workers draining the durable intake queue
  * (settlement worker) and self-healing fail-safe quarantines (re-score worker). With
  * RECONCILE_ENABLED=true the STK Query reconciliation sweep closes overdue ACCEPTED STK requests
- * (spec gh-6-recon); statements are imported with `npm run reconcile:import`.
+ * (spec gh-6-recon); statements are imported with `npm run reconcile:import`. With FABRIC_ENABLED=true
+ * the ledger worker drains the outbox to the commission chaincode and claims are gated by
+ * AuthorisePayout (DLT-03, docs/architecture/ledger-sync.md).
  * Graceful shutdown: close the server, stop the workers (draining the current batch),
  * then close Redis and PostgreSQL.
  */
@@ -63,6 +65,9 @@ import { ensureConfigSnapshot, trustStats } from './repositories/trust.repositor
 import { settlementWorker } from './workers/settlement.worker';
 import { rescoreWorker } from './workers/rescore.worker';
 import { reconcileWorker } from './workers/reconcile.worker';
+import { ledgerWorker } from './workers/ledger.worker';
+import { fabricConfig, fabricEnabled, ledgerKeys } from './config/fabric';
+import { ledgerStats } from './repositories/ledger.repository';
 
 // ── Express Application Setup ─────────────────────────────────────────
 const app = express();
@@ -181,13 +186,14 @@ app.get('/health/details', detailsAuth, async (_req: Request, res: Response) => 
     const isHealthy = redisOk && dbOk;
 
     // Queue observability; best effort (null when the DB cannot answer within ~1.5 s).
-    const [queue, quarantine, spoolDepth, recon, trust, payoutsByStatus] = await Promise.all([
+    const [queue, quarantine, spoolDepth, recon, trust, payoutsByStatus, ledger] = await Promise.all([
       dbOk ? withTimeout(queueStats(pool)) : null,
       dbOk ? withTimeout(quarantineStats(pool, rescoreWorker.config.maxAttempts)) : null,
       spoolService.depth(),
       dbOk ? withTimeout(reconcileStats(pool, overdueAfterMs(reconcileWorker.config))) : null,
       dbOk ? withTimeout(trustStats(pool)) : null,
       dbOk ? withTimeout(payoutStats(pool)) : null,
+      dbOk ? withTimeout(ledgerStats(pool)) : null,
     ]);
 
     res.status(isHealthy ? 200 : 503).json({
@@ -201,7 +207,9 @@ app.get('/health/details', detailsAuth, async (_req: Request, res: Response) => 
       stalledQuarantines: quarantine?.stalledQuarantines ?? null,
       spoolDepth,
       trust, // spec gh-23: average S_t, computed-hold distribution (24 h), quarantines by reason
-      workers: { settlement: settlementWorker.isRunning(), rescore: rescoreWorker.isRunning(), reconcile: reconcileWorker.isRunning() },
+      workers: { settlement: settlementWorker.isRunning(), rescore: rescoreWorker.isRunning(), reconcile: reconcileWorker.isRunning(), ledger: ledgerWorker.isRunning() },
+      // DLT-03: outbox rows not yet on the Fabric ledger, parked (DEAD: npm run ledger:requeue) and auditor holds mirrored.
+      ledgerOutbox: { enabled: fabricEnabled(), ...(ledger ?? { pending: null, dead: null, oldestPendingAgeSeconds: null, auditorHolds: null }) },
       reconciliation: {
         enabled: reconcileEnabled(),
         paidUnconfirmed: recon?.paidUnconfirmed ?? null,
@@ -256,7 +264,7 @@ const gracefulShutdown = async (signal: string, exitCode = 0) => {
 
   try {
     await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
-    await Promise.all([settlementWorker.stop(10_000), rescoreWorker.stop(10_000), reconcileWorker.stop(10_000)]);
+    await Promise.all([settlementWorker.stop(10_000), rescoreWorker.stop(10_000), reconcileWorker.stop(10_000), ledgerWorker.stop(10_000)]);
     await Promise.all([payoutDestinationService.settled(), payoutService.settled(), frozenPayoutService.settled()]); // in-flight alerts still read the pool
     await shutdownRedis();
     await shutdownDb();
@@ -279,7 +287,10 @@ process.on('uncaughtException', (err) => {
 });
 
 // ── Start Listener ────────────────────────────────────────────────────
-export const REQUIRED_MIGRATION = '010_admin_oversight';
+export const REQUIRED_MIGRATION = '011_ledger_sync';
+
+/** The ledger's tx timestamps come from this host's clock; maturity and the 72 h cap rest on them. */
+const MAX_CLOCK_SKEW_MS = 60_000;
 
 /**
  * Startup gates, without side effects: `fatal` problems refuse the start, `warnings` are logged.
@@ -315,6 +326,23 @@ export async function preflight(env: NodeJS.ProcessEnv, db: Db): Promise<{ fatal
   }
   const sms = ['AFRICASTALKING_USERNAME', 'AFRICASTALKING_API_KEY'].filter((k) => env[k]?.trim());
   if (sms.length === 1) warnings.push('AFRICASTALKING_* is only partly set: payout alerts are log-only until both are set');
+  // DLT-03: with the ledger on, the Fabric identity, the HMAC keys and the clocks must be right.
+  if (fabricEnabled(env)) {
+    gate(() => fabricConfig(env));
+    try {
+      const { rows: [r] } = await db.query('SELECT NOW() AS now');
+      const skew = Math.abs(new Date(r.now).getTime() - Date.now());
+      if (skew > MAX_CLOCK_SKEW_MS) fatal.push(`the Postgres clock and this host's clock differ by ${Math.round(skew / 1000)} s (max ${MAX_CLOCK_SKEW_MS / 1000} s): fix NTP before enabling the ledger`);
+    } catch (error) {
+      fatal.push(`cannot read the Postgres clock (${(error as Error).message})`);
+    }
+  } else {
+    try {
+      ledgerKeys(env);
+    } catch (error) {
+      warnings.push(`${(error as Error).message}: no ledger outbox rows are written while it is unset (backfill later with npm run ledger:init)`);
+    }
+  }
   if (!env.MPESA_CALLBACK_TOKEN) fatal.push('MPESA_CALLBACK_TOKEN is not set (every Daraja callback would be rejected)');
   try {
     const { rows } = await db.query('SELECT 1 FROM schema_migrations WHERE version = $1', [REQUIRED_MIGRATION]);
@@ -361,6 +389,7 @@ async function startup(): Promise<void> {
   settlementWorker.start();
   rescoreWorker.start();
   if (reconcileEnabled()) reconcileWorker.start();
+  if (fabricEnabled()) ledgerWorker.start();
 
   server = app.listen(PORT, () => {
     console.info(`[Gateway] SalesMesh-Ledger ingestion gateway listening on :${PORT}`);

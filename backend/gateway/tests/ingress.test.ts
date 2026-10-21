@@ -82,6 +82,9 @@ const mockPgQuery = jest.fn(async (text: string, values: any[] = []) => {
   };
 });
 
+// The ledger COMMIT builder reads real rows (covered in tests/integration/ledger_sync.int.test.ts).
+jest.mock('../src/repositories/ledger.repository', () => ({ ...jest.requireActual('../src/repositories/ledger.repository'), enqueueCommit: jest.fn(async () => true) }));
+
 jest.mock('pg', () => ({
   Pool: jest.fn().mockImplementation(() => ({
     query: mockPgQuery,

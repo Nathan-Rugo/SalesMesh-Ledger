@@ -27,6 +27,11 @@ jobs:
           cache-dependency-path: blockchain/chaincode/go.sum
       - name: Commission chaincode unit tests (vet, race, coverage)
         run: make fabric-chaincode-test
+      - name: Known vulnerabilities in reachable code (govulncheck)
+        working-directory: blockchain/chaincode
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
 
   smoke:
     runs-on: ubuntu-latest

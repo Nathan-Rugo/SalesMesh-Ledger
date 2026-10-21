@@ -16,3 +16,7 @@ process.env.AUTH_FAILURE_MIN_MS = process.env.AUTH_FAILURE_MIN_MS || '0';
 // worker can exceed it and turn an expected 200 into a 503, so tests use a generous deadline;
 // the one test that exercises the deadline itself delays Postgres past this value.
 process.env.HOT_PATH_DEADLINE_MS = process.env.HOT_PATH_DEADLINE_MS || '1500';
+// Fabric ledger sync (DLT-03): the HMAC keys are set, so every settle / claim writes its outbox rows;
+// FABRIC_ENABLED stays unset (nothing is sent) unless a test turns it on.
+process.env.LEDGER_STATE_HMAC_KEY = process.env.LEDGER_STATE_HMAC_KEY || 'test-ledger-state-hmac-key-0123456789abcdef';
+process.env.LEDGER_CONSENT_HMAC_KEY = process.env.LEDGER_CONSENT_HMAC_KEY || 'test-ledger-consent-hmac-key-0123456789abcdef';

@@ -132,15 +132,18 @@ export interface ClaimSplit {
   carryOutCents: number;
 }
 
+/** AuthorisePayout (#9) refuses more escrows than this in one payout: a shared contract. */
+export const MAX_CLAIM_ESCROWS = 1000;
+
 /**
- * The longest prefix of `escrows` (oldest first) whose amount stays within `maxAmount`. Everything
- * else stays claimable. Cents are integers: no floating-point money.
+ * The longest prefix of `escrows` (oldest first) whose amount stays within `maxAmount`, at most
+ * MAX_CLAIM_ESCROWS escrows. Everything else stays claimable. Cents are integers: no floating-point money.
  */
 export function splitClaim(escrows: ReadonlyArray<{ escrowId: string; cents: number }>, carryInCents: number, maxAmount: number): ClaimSplit {
   const escrowIds: string[] = [];
   let grossCents = 0;
   for (const e of escrows) {
-    if (Math.floor((grossCents + e.cents + carryInCents) / 100) > maxAmount) break;
+    if (escrowIds.length >= MAX_CLAIM_ESCROWS || Math.floor((grossCents + e.cents + carryInCents) / 100) > maxAmount) break;
     escrowIds.push(e.escrowId);
     grossCents += e.cents;
   }

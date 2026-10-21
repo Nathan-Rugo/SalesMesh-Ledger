@@ -1,4 +1,4 @@
-.PHONY: help up down restart logs ps test test-ml test-gateway seed migrate fabric-up fabric-down fabric-smoke fabric-chaincode-test fabric-commission-e2e
+.PHONY: help up down restart logs ps test test-ml test-gateway seed migrate fabric-up fabric-down fabric-smoke fabric-chaincode-test fabric-commission-e2e fabric-ledger-e2e
 
 PG_CONTAINER ?= salesmesh-postgres
 PG_USER ?= salesmesh_user
@@ -19,6 +19,7 @@ help:
 	@echo "  make fabric-smoke - Full testnet check: up, deploy, 2-org invoke, query, down"
 	@echo "  make fabric-chaincode-test - Commission chaincode unit tests (go vet, go test -race -cover)"
 	@echo "  make fabric-commission-e2e - Commission chaincode on the testnet: deploy, every function by role, upgrade, down"
+	@echo "  make fabric-ledger-e2e - Gateway ledger sync on the testnet: escrow -> commit -> quarantine -> release -> authorise -> settle, peer outage, down"
 
 up:
 	docker compose -f infra/docker-compose.yml up -d
@@ -65,3 +66,6 @@ fabric-chaincode-test:
 
 fabric-commission-e2e:
 	bash blockchain/network/scripts/commission_e2e.sh
+
+fabric-ledger-e2e:
+	bash blockchain/network/scripts/ledger_e2e.sh

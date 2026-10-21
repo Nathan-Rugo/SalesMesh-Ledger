@@ -424,7 +424,7 @@ describe('/health/details observability', () => {
     expect(res.body.queue).toMatchObject({ depth: 4, oldestPendingAgeSeconds: 12.5, dead: 1, unresolved: 2 });
     expect(res.body.awaitingSelfHeal).toBe(4);
     expect(res.body.stalledQuarantines).toBe(2);
-    expect(res.body.workers).toEqual({ settlement: false, rescore: false, reconcile: false });
+    expect(res.body.workers).toEqual({ settlement: false, rescore: false, reconcile: false, ledger: false });
     // spec gh-6-recon: the "state limbo" register
     expect(res.body.reconciliation).toMatchObject({
       enabled: false,
