@@ -5,3 +5,5 @@ blockchain/network/**/*.yml text eol=lf
 blockchain/network/**/*.json text eol=lf
 blockchain/network/**/Dockerfile text eol=lf
 blockchain/network/.env.example text eol=lf
+infra/**/*.sh text eol=lf
+infra/caddy/Caddyfile text eol=lf
