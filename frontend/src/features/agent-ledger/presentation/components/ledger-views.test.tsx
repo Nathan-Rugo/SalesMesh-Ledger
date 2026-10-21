@@ -178,6 +178,14 @@ describe('agent dashboard (I/O matrix)', () => {
     expect(await screen.findByText(/did not accept the payout/)).toBeInTheDocument();
   });
 
+  it('409 balance_under_review: nothing sent, claim again for the rest', async () => {
+    const { gw } = gateway(ledgerBody(), { [CLAIM]: () => json(409, { error: 'balance_under_review', payout: payoutView({ status: 'FAILED' }) }) });
+    renderApp(<AgentDashboard />, gw.fetch);
+    await claimFlow();
+    send();
+    expect(await screen.findByText(/Part of your balance is under review/)).toBeInTheDocument();
+  });
+
   it('double tap: two taps in the same moment send exactly one POST', async () => {
     let release: (r: Response) => void = () => undefined;
     const { gw } = gateway(ledgerBody(), { [CLAIM]: () => new Promise<Response>((r) => (release = r)) as unknown as Response });

@@ -378,7 +378,9 @@ export class PayoutService {
       }
       if (r.code) {
         this.metrics.ledger.authoriseRefused += 1;
-        return { ok: false, reason: `ledger_${r.code.toLowerCase()}`, infra: false, mirror: await this.quarantinedOnLedger(ledger, escrowIds, deadline + 5_000) };
+        const mirror = await this.quarantinedOnLedger(ledger, escrowIds, deadline + 5_000);
+        // ledger_auditor_hold: the held escrows leave the balance, so a new claim can succeed (409, not 503).
+        return { ok: false, reason: mirror.length ? 'ledger_auditor_hold' : `ledger_${r.code.toLowerCase()}`, infra: false, mirror };
       }
       console.warn(`[Payouts] payout ${p.payoutId}: AuthorisePayout not committed (${r.message}); retrying`);
       if (Date.now() + delay >= deadline) break;

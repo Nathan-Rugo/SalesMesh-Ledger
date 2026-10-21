@@ -351,7 +351,7 @@ describeDb('Fabric ledger sync (real Postgres, fake Fabric)', () => {
     expect((await payoutRow(p.payoutId)).ledger_block_hash).toBe((99).toString(16).padStart(64, '0'));
   });
 
-  it('claim refused (#9 code): rollback ledger_<code>, nothing sent, no SMS, escrows HELD; QUARANTINED-on-ledger escrows mirrored; 503', async () => {
+  it('claim refused under an auditor hold: rollback ledger_auditor_hold, nothing sent, no SMS, escrows HELD; QUARANTINED-on-ledger escrows mirrored; 409 balance_under_review', async () => {
     const a = await agent();
     const e1 = await escrow(a.agentId, { gross: '30.00' });
     const e2 = await escrow(a.agentId, { gross: '20.00' });
@@ -360,7 +360,7 @@ describeDb('Fabric ledger sync (real Postgres, fake Fabric)', () => {
     fake.escrows.set(e1.escrowId, { status: 'HELD' });
     fake.escrows.set(e2.escrowId, { status: 'QUARANTINED', lockedBy: 'auditor' });
     const r = (await service.claim(a.userId, '1234', '1', client)) as any;
-    expect(r.payout).toMatchObject({ status: 'FAILED', failureReason: 'ledger_invalid_transition' });
+    expect(r.payout).toMatchObject({ status: 'FAILED', failureReason: 'ledger_auditor_hold' });
     expect(b2c.b2cPayment).not.toHaveBeenCalled();
     await service.settled();
     expect(sent).toEqual([]);
@@ -369,6 +369,26 @@ describeDb('Fabric ledger sync (real Postgres, fake Fabric)', () => {
     expect(await outbox(`op = 'SETTLE' AND payout_id = $1`, [r.payout.payoutId])).toEqual([]); // refused: never settled
     expect(metrics.ledger).toMatchObject({ authoriseRefused: 1, mirrored: 1 });
 
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() } as any;
+    await new PayoutController({ claim: async () => r, disclosure: () => ({}) } as any).claim({ auth: { userId: a.userId }, body: {}, headers: {}, get: () => undefined, ip: '' } as any, res);
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'balance_under_review' }));
+
+    // The held escrow left the balance: the next claim takes the rest and goes through.
+    fake.handler = (_fn, _r, txId) => ok(txId);
+    const again = (await service.claim(a.userId, '1234', '1', client)) as any;
+    expect(again.payout).toMatchObject({ status: 'SENT', amount: 30 });
+  });
+
+  it('claim refused with nothing held on the ledger: rollback ledger_<code>, 503 temporarily_unavailable', async () => {
+    const a = await agent();
+    const e1 = await escrow(a.agentId, { gross: '30.00' });
+    await drain();
+    fake.handler = (fn, _r, txId) => (fn === 'AuthorisePayout' ? { ok: false, code: 'NOT_MATURED', message: `NOT_MATURED: escrow ${e1.escrowId}` } : ok(txId));
+    fake.escrows.set(e1.escrowId, { status: 'HELD' });
+    const r = (await service.claim(a.userId, '1234', '1', client)) as any;
+    expect(r.payout).toMatchObject({ status: 'FAILED', failureReason: 'ledger_not_matured' });
+    expect(await escrowRow(e1.escrowId)).toMatchObject({ escrow_status: 'HELD', payout_id: null });
     const res = { status: jest.fn().mockReturnThis(), json: jest.fn() } as any;
     await new PayoutController({ claim: async () => r, disclosure: () => ({}) } as any).claim({ auth: { userId: a.userId }, body: {}, headers: {}, get: () => undefined, ip: '' } as any, res);
     expect(res.status).toHaveBeenCalledWith(503);

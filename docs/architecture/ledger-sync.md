@@ -46,8 +46,8 @@ sequenceDiagram
     B-->>PS: result → PAID / FAILED → SETTLE row (p: + every e:)
   else refused (#9 code)
     PS->>F: GetEscrow for every claim escrow
-    PS->>PG: rollback FAILED ledger_<code>; mirror QUARANTINED ones as auditor_hold
-    PS-->>A: 503 temporarily_unavailable (no B2C, no SMS)
+    PS->>PG: rollback FAILED; mirror QUARANTINED ones as auditor_hold
+    PS-->>A: 409 balance_under_review if any were mirrored (ledger_auditor_hold), else 503 temporarily_unavailable (ledger_<code>); no B2C, no SMS
   else still failing
     PS->>PG: rollback FAILED ledger_unavailable + Settle FAILED (delayed 5 min, tx ids to check)
     PS-->>A: 503 temporarily_unavailable
@@ -95,7 +95,7 @@ sequenceDiagram
 - When Authorise is refused (any #9 code, e.g. `INVALID_TRANSITION` or `CANARY_NOT_HEALTHY`), the gate reads `GetEscrow` for every escrow of the claim. Each one the ledger has QUARANTINED is mirrored in Postgres:
   - QUARANTINED, reason `auditor_hold`, `security_hold = TRUE`;
   - no admin override, no self-heal;
-  - the payout is FAILED `ledger_<code>`, with no Settle.
+  - the payout is FAILED with no Settle. When at least one escrow was mirrored, the reason is `ledger_auditor_hold` and the agent gets 409 `balance_under_review`: the held escrows have left the balance, so claiming again pays the rest. Any other refusal is FAILED `ledger_<code>` with 503 `temporarily_unavailable`, because it clears only when an operator fixes the cause (clock skew, a DEAD row, a bad deploy).
 - A gateway Release or Quarantine refused with `LOCKED_BY_AUDITOR`, or a Quarantine answered as a no-op with `lockedBy = auditor`, mirrors the same way. Its row is `SUPERSEDED`, not dead.
 - The worker polls `auditor_hold` escrows every `LEDGER_AUDITOR_POLL_MS`. When the auditor releases one, it goes back to HELD with the ledger's `releaseDueAt`, and `security_hold` is cleared.
 
