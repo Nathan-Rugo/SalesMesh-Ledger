@@ -75,3 +75,7 @@ reconcile-evidence/
 
 # UFAA holder reports (names, phone numbers)
 ufaa-returns/
+
+# gen_env.sh backups / temp files (secrets)
+.env.bak.*
+.env.tmp.*

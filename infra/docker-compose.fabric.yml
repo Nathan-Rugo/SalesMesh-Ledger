@@ -1,0 +1,20 @@
+# Fabric overlay (docs/architecture/deployment.md): the gateway joins the testnet's Docker network and
+# reaches peer0.merchant over mTLS by its container name; port 7051 stays unpublished to the internet.
+# Needs the network from `make fabric-up`. Without the ledger, leave this file out.
+services:
+  gateway:
+    environment:
+      FABRIC_ORG_DIR: /fabric/merchant
+      FABRIC_PEER_ENDPOINT: peer0.merchant.salesmesh.test:7051
+      FABRIC_PEER_HOST_ALIAS: peer0.merchant.salesmesh.test
+    volumes:
+      # Read on every start, never copied: the crypto is regenerated with the network.
+      - ../blockchain/network/organizations/peerOrganizations/merchant.salesmesh.test:/fabric/merchant:ro
+    networks:
+      - default
+      - fabric
+
+networks:
+  fabric:
+    name: salesmesh_fabric
+    external: true

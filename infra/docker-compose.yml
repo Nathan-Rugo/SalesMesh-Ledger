@@ -1,0 +1,127 @@
+# SalesMesh app stack (docs/architecture/deployment.md): Postgres, Redis, ml-engine, gateway, PWA, Caddy.
+# Run from the repo root with the root .env for interpolation:
+#   docker compose --env-file .env -f infra/docker-compose.yml up -d --build
+# With the Fabric ledger, add -f infra/docker-compose.fabric.yml (make deploy-up).
+# Only Caddy publishes ports (80/443). Memory limits sum to ~1.8 GB, the app's share of a 4 GB VM.
+name: salesmesh
+
+x-app: &app
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  postgres:
+    <<: *app
+    image: postgres:16
+    container_name: salesmesh-postgres   # make seed / make migrate exec into this name
+    mem_limit: 384m
+    environment:
+      POSTGRES_USER: ${DB_USER:?set DB_USER in .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:?set DB_NAME in .env}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Runs once, on an empty data volume only (records every migration as applied).
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init_db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    <<: *app
+    image: redis:7-alpine
+    mem_limit: 96m
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    # Config from stdin keeps the password off the process command line.
+    # noeviction: a full Redis refuses writes (the gateway falls back to Postgres) instead of dropping idempotency keys.
+    command: ["sh", "-c", "printf 'requirepass %s\\nappendonly yes\\nmaxmemory 64mb\\nmaxmemory-policy noeviction\\n' \"$$REDIS_PASSWORD\" | exec redis-server -"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ml-engine:
+    <<: *app
+    build: ../ml-engine
+    mem_limit: 640m
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8000"
+      ENVIRONMENT: production
+      MODEL_SHA256: ${MODEL_SHA256:-}
+      ENABLE_SHAP: "true"
+      DEFAULT_TOP_K_SHAP: "3"
+    # The image's HEALTHCHECK (/health) gates the gateway below.
+
+  gateway:
+    <<: *app
+    build: ../backend/gateway
+    mem_limit: 384m
+    env_file: ../.env
+    environment:
+      NODE_ENV: production
+      NODE_OPTIONS: --max-old-space-size=256
+      PORT: "4000"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      ML_SERVICE_URL: http://ml-engine:8000
+      TRUST_PROXY: "1"   # Caddy is the one hop in front
+      PUBLIC_ORIGIN: https://${PUBLIC_HOST:?set PUBLIC_HOST in .env}
+      CORS_ORIGINS: https://${PUBLIC_HOST}
+    volumes:
+      # JWT_PRIVATE_KEY_FILE=keys/... is relative to /usr/src/app (gen_env.sh writes the key).
+      - ../backend/gateway/keys:/usr/src/app/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      ml-engine: { condition: service_healthy }
+
+  frontend:
+    <<: *app
+    build:
+      context: ../frontend
+      args:
+        GATEWAY_URL: http://gateway:4000
+        NEXT_PUBLIC_SITE_URL: https://${PUBLIC_HOST}
+    mem_limit: 256m
+    # The image's HEALTHCHECK fetches /offline.
+
+  caddy:
+    <<: *app
+    image: caddy:2-alpine
+    mem_limit: 64m
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data   # certificates: keep it, Let's Encrypt rate-limits re-issues
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      frontend: { condition: service_healthy }
+      gateway: { condition: service_started }   # the PWA (and /offline) is served even while the gateway restarts
+
+volumes:
+  pg_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
