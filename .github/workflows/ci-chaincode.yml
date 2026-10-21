@@ -31,7 +31,7 @@ jobs:
         run: make fabric-chaincode-test
       - name: Known vulnerabilities in reachable code (govulncheck)
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           (cd blockchain/chaincode && govulncheck ./...)
           (cd blockchain/network/smoke-chaincode && govulncheck ./...)
 
