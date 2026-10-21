@@ -1,5 +1,5 @@
-# Pins its own builder: the testnet's GOLANG_IMAGE (Go 1.24, used by the smoke chaincode) is out of
-# support and too old for the patched gRPC this module needs (govulncheck-clean as of 2026-10-20).
+# Pins its own builder, the same as the testnet's GOLANG_IMAGE (golang:1.27-alpine) used by the smoke
+# chaincode: a supported Go with the patched gRPC (govulncheck runs on both modules in CI).
 FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./

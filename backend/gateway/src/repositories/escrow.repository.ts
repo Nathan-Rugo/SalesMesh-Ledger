@@ -9,6 +9,7 @@
 
 import { RETRYABLE_FAIL_SAFE_CAUSES } from '../services/risk_client.service';
 import type { Db } from './db.types';
+import { enqueueQuarantine, enqueueRelease } from './ledger.repository';
 
 const LATEST_EVENT = `
   SELECT v.is_fail_safe, v.fail_safe_cause FROM verification_events v
@@ -99,23 +100,30 @@ export async function lockRescoreLease(db: Db, escrowId: string, token: string):
   return rows.length === 1;
 }
 
-/** Guarded promote: model CLEAR moves QUARANTINED → HELD, T_hold (seconds) from the re-score. */
+/** Guarded promote: model CLEAR moves QUARANTINED → HELD, T_hold (seconds) from the re-score; queues the ledger Release. */
 export async function promoteToHeld(db: Db, escrowId: string, token: string, holdSeconds: number): Promise<boolean> {
-  const { rowCount } = await db.query(
+  const { rows } = await db.query(
     `UPDATE escrow_accounts
         SET escrow_status = 'HELD', hold_period_hours = CEIL($3::int / 3600.0)::int, hold_seconds = $3::int,
             release_due_at = NOW() + make_interval(secs => $3::int), quarantine_reason = NULL,
             rescore_claimed_at = NULL, rescore_claim_token = NULL
       WHERE escrow_id = $1 AND rescore_claim_token = $2
-        AND escrow_status = 'QUARANTINED' AND NOT security_hold`,
+        AND escrow_status = 'QUARANTINED' AND NOT security_hold
+      RETURNING release_due_at`,
     [escrowId, token, holdSeconds]
   );
-  return rowCount === 1;
+  if (rows.length !== 1) return false;
+  await enqueueRelease(db, escrowId, 'rescore_clear', new Date(rows[0].release_due_at));
+  return true;
 }
 
-/** A re-score that ended in a model-made quarantine (REVIEW / QUARANTINE / trust freeze) records why. */
+/** A re-score that ended in a model-made quarantine (REVIEW / QUARANTINE / trust freeze) records why; a new reason goes to the ledger. */
 export async function setQuarantineReason(db: Db, escrowId: string, reason: string): Promise<void> {
-  await db.query(`UPDATE escrow_accounts SET quarantine_reason = $2 WHERE escrow_id = $1 AND escrow_status = 'QUARANTINED'`, [escrowId, reason]);
+  const { rowCount } = await db.query(
+    `UPDATE escrow_accounts SET quarantine_reason = $2 WHERE escrow_id = $1 AND escrow_status = 'QUARANTINED' AND quarantine_reason IS DISTINCT FROM $2`,
+    [escrowId, reason]
+  );
+  if (rowCount === 1) await enqueueQuarantine(db, escrowId, reason);
 }
 
 /** Ends our lease; the next attempt waits `delayMs` (re-score failures back off). */

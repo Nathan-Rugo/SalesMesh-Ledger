@@ -486,6 +486,8 @@ describeDb('UFAA report-and-remit (real Postgres)', () => {
     expect((await status(s.aNew)).escrow_status).toBe('HELD');
     expect(await ret()).toMatchObject({ status: 'REMITTED', remittance_reference: 'CBK-2026-001', remitted_items: 2, remitted_cents: '17075' });
     expect(await events('UFAA_REMITTED')).toHaveLength(2);
+    // DLT-03: REMITTED is deferred in the #9 chaincode, so a remit queues no ledger op.
+    expect((await db.pool.query(`SELECT count(*)::int AS n FROM ledger_outbox WHERE escrow_id = ANY($1::uuid[]) AND op <> 'COMMIT'`, [[s.a1, s.a2, s.b1]])).rows[0].n).toBe(0);
     // The sub-shilling carry is never remitted.
     expect((await db.pool.query(`SELECT payout_carry_cents FROM sales_agents WHERE agent_id = $1`, [s.a.agentId])).rows[0].payout_carry_cents).toBe(42);
 

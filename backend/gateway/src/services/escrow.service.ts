@@ -8,6 +8,7 @@ import pool from '../config/db';
 import { trustParams } from '../config/trust';
 import { assess, QUARANTINE_HOLD_HOURS, type TrustAssessment, type TrustParams } from '../domain/trust';
 import { withTransaction, type Db, type TxDb } from '../repositories/db.types';
+import { enqueueCommit } from '../repositories/ledger.repository';
 import { agentMaturity, insertTrustScore, lockAgentRating, medianSettledAmount, penaliseReceipt } from '../repositories/trust.repository';
 import { RiskEvaluationResponse } from './risk_client.service';
 
@@ -201,7 +202,8 @@ export class EscrowService {
    *
    * NFR-08: only an explicit, model-made CLEAR above the trust freeze is HELD (for T_hold); REVIEW,
    * QUARANTINE, fail-safe, frozen and security-held decisions are quarantined. A security-held
-   * receipt also penalises the agent (idempotent). Re-running is a no-op.
+   * receipt also penalises the agent (idempotent). Re-running is a no-op. A new escrow queues its
+ * ledger CommitTransaction (DLT-03) in the same transaction.
    */
   public async processSettlement(
     transactionId: string,
@@ -232,6 +234,7 @@ export class EscrowService {
          RETURNING escrow_id`,
         [transactionId, gross, Math.ceil(outcome.holdSeconds / 3600), outcome.status, securityHold, outcome.holdSeconds, outcome.reason]
       );
+      if (rows.length > 0) await enqueueCommit(db, rows[0].escrow_id); // DLT-03: the ledger COMMIT, same transaction
       if (securityHold) {
         const t = await this.subject(db, transactionId);
         if (t) await penaliseReceipt(db, t.receipt, this.trust);

@@ -86,7 +86,11 @@ export class PayoutController {
         return;
       case 'claimed':
         if (r.payout.status !== 'FAILED') res.status(202).json({ payout: view(r.payout) });
-        else if (r.payout.failureReason === 'not_sent') res.status(503).json({ error: 'temporarily_unavailable', payout: view(r.payout) });
+        // ledger_auditor_hold: the ledger refused because the auditor holds part of the balance; those escrows
+        // were mirrored out of the balance, so the agent can claim the rest now.
+        else if (r.payout.failureReason === 'ledger_auditor_hold') res.status(409).json({ error: 'balance_under_review', payout: view(r.payout) });
+        // not_sent: B2C unreachable; ledger_*: the AuthorisePayout gate failed closed (nothing was sent).
+        else if (r.payout.failureReason === 'not_sent' || r.payout.failureReason?.startsWith('ledger_')) res.status(503).json({ error: 'temporarily_unavailable', payout: view(r.payout) });
         else res.status(502).json({ error: 'payout_failed', payout: view(r.payout) });
         return;
       default:

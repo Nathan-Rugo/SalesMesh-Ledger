@@ -16,6 +16,12 @@
  * Every state change writes a PAYOUT_STATUS_CHANGED event (same transaction) and sends an SMS to the
  * paid line. Alerts never block or roll back the flow.
  *
+ * Fabric ledger gate (DLT-03, #10), with FABRIC_ENABLED=true: between the claim and the B2C call,
+ * AuthorisePayout must commit (retried for up to FABRIC_AUTHORISE_TIMEOUT_MS). Refused or still
+ * failing: the claim is rolled back (payout FAILED `ledger_*`, escrows claimable again, no B2C, no
+ * SMS) and the agent gets 503. A refusal mirrors every claim escrow the ledger has QUARANTINED
+ * (the auditor's hold) as `auditor_hold`.
+ *
  * Unclaimed reminders (part 3a): housekeeping texts the login phone when the claimable balance has
  * waited PAYOUT_REMINDER_DAYS (7, 30, 90) since its oldest escrow matured, once per stage per cycle,
  * only in PAYOUT_REMINDER_HOURS (Africa/Nairobi).
@@ -25,10 +31,13 @@ import crypto from 'crypto';
 import pool from '../config/db';
 import { AuthService, type ClientInfo, type PinConfirmResult } from '../auth/auth.service';
 import { b2cClient, parseB2cResult, parseTransactionStatusResult, type B2cClient } from '../daraja/client';
+import { authoriseTimeoutMs, fabricEnabled } from '../config/fabric';
+import { authoriseRequest } from '../domain/ledger';
 import { DISCLOSURES, payoutConfig, splitClaim, type PayoutConfig } from '../domain/payout';
 import { maskMsisdn } from '../domain/payout_destination';
 import { findAgentForUser } from '../repositories/agent.repository';
 import type { TxDb } from '../repositories/db.types';
+import { recordAuthorised, recordAuthoriseAttempt, recordConsentDigest } from '../repositories/ledger.repository';
 import {
   applyPayoutResult,
   applyStatusResult,
@@ -44,11 +53,14 @@ import {
   recordPayoutSend,
   releaseStatusLease,
   resolvePayout,
+  rollbackClaim,
   type PayoutChange,
   type PayoutRow,
   type ResultOutcome,
 } from '../repositories/payout.repository';
 import { remittedForAgent } from '../repositories/ufaa.repository';
+import { payoutCanary } from './canary.service';
+import { fabricLedger, type LedgerClient } from './fabric.service';
 import { metrics as defaultMetrics, type GatewayMetrics } from './metrics.service';
 import { notifierFromEnv, notifySafely, type Notifier } from './notifier.service';
 import { isNotSent, payoutsEnabled } from './payout_destination.service';
@@ -61,7 +73,13 @@ export interface PayoutDeps {
   metrics?: GatewayMetrics;
   /** Overrides of the PAYOUT_* settings (tests). */
   config?: Partial<PayoutConfig>;
+  /** The Fabric client (tests: a fake); FABRIC_ENABLED / FABRIC_AUTHORISE_TIMEOUT_MS by default. */
+  ledger?: LedgerClient;
+  ledgerEnabled?: () => boolean;
+  authoriseTimeoutMs?: number;
 }
+
+type Gate = { ok: true } | { ok: false; reason: string; infra: boolean; mirror: string[] };
 
 type PinFailure = Exclude<PinConfirmResult, { kind: 'ok' }>;
 type AgentFailure = { kind: 'not_provisioned' } | { kind: 'disabled' };
@@ -100,6 +118,9 @@ export class PayoutService {
   private readonly overrides: Partial<PayoutConfig>;
   private readonly inflightAlerts = new Set<Promise<unknown>>();
   private lastReminderRun = -Infinity;
+  private readonly ledgerDep: LedgerClient | undefined;
+  private readonly ledgerEnabled: () => boolean;
+  private readonly authoriseTimeoutMs: number | undefined;
 
   constructor(deps: PayoutDeps = {}) {
     this.db = deps.db ?? pool;
@@ -108,6 +129,9 @@ export class PayoutService {
     this.notifier = deps.notifier ?? notifierFromEnv();
     this.metrics = deps.metrics ?? defaultMetrics;
     this.overrides = deps.config ?? {};
+    this.ledgerDep = deps.ledger;
+    this.ledgerEnabled = deps.ledgerEnabled ?? (() => fabricEnabled());
+    this.authoriseTimeoutMs = deps.authoriseTimeoutMs;
   }
 
   /** PAYOUT_* read per call (a bad value fails the request, not the import); preflight validates them. */
@@ -142,11 +166,11 @@ export class PayoutService {
     if (!agent) return { kind: 'not_provisioned' };
     if (agent.userDisabled) return { kind: 'disabled' };
     const [escrows, ctx, payouts, remitted, pending] = await Promise.all([
-      claimableEscrows(this.db, agent.agentId),
+      claimableEscrows(this.db, agent.agentId, false, this.ledgerEnabled()),
       payoutContext(this.db, agent.agentId),
       listPayouts(this.db, agent.agentId),
       remittedForAgent(this.db, agent.agentId),
-      pendingAccruals(this.db, agent.agentId, 50),
+      pendingAccruals(this.db, agent.agentId, 50, this.ledgerEnabled()),
     ]);
     const cents = escrows.reduce((s, e) => s + e.cents, 0) + ctx.carryCents;
     return {
@@ -179,10 +203,30 @@ export class PayoutService {
       disclosureText: DISCLOSURES[cfg.disclosureVersion],
       minAmount: cfg.minAmount,
       maxAmount: cfg.maxAmount,
+      ledger: this.ledgerEnabled(),
     });
     if (created.kind !== 'created') return created;
     this.metrics.payoutClaims.claimed += 1;
     const claimed = created.payout;
+
+    if (this.ledgerEnabled()) {
+      // Any throw after the claim committed must still roll it back (fail closed); the rollback's delayed
+      // Settle covers an Authorise that committed before e.g. recordAuthorised failed.
+      const gate: Gate = await this.authorise(claimed, created.escrowIds).catch((error) => {
+        console.error(`[Payouts] payout ${claimed.payoutId}: ledger gate failed:`, (error as Error).message);
+        return { ok: false, reason: 'ledger_unavailable', infra: true, mirror: [] };
+      });
+      if (!gate.ok) {
+        const rolled = await rollbackClaim(this.db, claimed.payoutId, gate);
+        this.metrics.payoutClaims.failed += 1;
+        this.metrics.ledger.mirrored += rolled?.mirrored.length ?? 0;
+        console.error(
+          `[Payouts] payout ${claimed.payoutId}: AuthorisePayout ${gate.infra ? 'unavailable' : 'refused'} (${gate.reason}); claim rolled back, nothing sent` +
+            (rolled?.mirrored.length ? `; ${rolled.mirrored.length} escrow(s) held by the auditor mirrored as auditor_hold` : '')
+        );
+        return { kind: 'claimed', payout: rolled?.payout ?? claimed };
+      }
+    }
 
     const outcome = await this.b2c.b2cPayment({
       originatorConversationId: claimed.payoutId,
@@ -277,7 +321,7 @@ export class PayoutService {
     if (hour < cfg.reminderHours[0] || hour >= cfg.reminderHours[1]) return 0;
     // Ages move by days: query at most hourly (a night skip does not use up the hour).
     if (now.getTime() - this.lastReminderRun < REMINDER_EVERY_MS) return 0;
-    const due = await dueReminders(this.db, { stages: cfg.reminderDays, minAmount: cfg.minAmount, limit: 100 });
+    const due = await dueReminders(this.db, { stages: cfg.reminderDays, minAmount: cfg.minAmount, limit: 100, ledger: this.ledgerEnabled() });
     this.lastReminderRun = now.getTime();
     for (const r of due) {
       const amount = Math.floor(r.cents / 100);
@@ -300,6 +344,71 @@ export class PayoutService {
     const r = await resolvePayout(this.db, id, o, operator);
     if (r.kind === 'resolved') this.applied(r);
     return r;
+  }
+
+  /**
+   * The synchronous ledger gate: AuthorisePayout, the same request retried on infrastructure failures
+   * until it commits or the timeout passes. Every tx id is recorded on the payout before it can reach
+   * the orderer. A #9 refusal reads every claim escrow back, so the auditor's holds can be mirrored.
+   */
+  private async authorise(p: PayoutRow, escrowIds: string[]): Promise<Gate> {
+    const ledger = this.ledgerDep ?? fabricLedger();
+    const consentDigest = await recordConsentDigest(this.db, p.payoutId, p.consentHash);
+    if (!consentDigest) return { ok: false, reason: 'ledger_unavailable', infra: false, mirror: [] }; // no HMAC keys (preflight requires them)
+    const canary = await payoutCanary(this.db, p.payoutId);
+    const request = authoriseRequest({
+      payoutId: p.payoutId,
+      agentId: p.agentId,
+      escrowIds,
+      grossCents: p.grossCents,
+      carryInCents: p.carryInCents,
+      carryOutCents: p.carryOutCents,
+      amount: p.amount,
+      consentDigest,
+      disclosureVersion: p.disclosureVersion,
+      canary,
+    });
+    const deadline = Date.now() + (this.authoriseTimeoutMs ?? authoriseTimeoutMs());
+    for (let delay = 250; ; delay = Math.min(delay * 2, 2_000)) {
+      const r = await ledger.submit('AuthorisePayout', request, { deadline, onTxId: (txId) => recordAuthoriseAttempt(this.db, p.payoutId, txId) });
+      if (r.ok) {
+        await recordAuthorised(this.db, p.payoutId, r.txId, r.blockNumber);
+        this.metrics.ledger.authorised += 1;
+        return { ok: true };
+      }
+      if (r.code) {
+        this.metrics.ledger.authoriseRefused += 1;
+        const mirror = await this.quarantinedOnLedger(ledger, escrowIds, deadline + 5_000);
+        // ledger_auditor_hold: the held escrows leave the balance, so a new claim can succeed (409, not 503).
+        return { ok: false, reason: mirror.length ? 'ledger_auditor_hold' : `ledger_${r.code.toLowerCase()}`, infra: false, mirror };
+      }
+      console.warn(`[Payouts] payout ${p.payoutId}: AuthorisePayout not committed (${r.message}); retrying`);
+      if (Date.now() + delay >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+    this.metrics.ledger.authoriseUnavailable += 1;
+    return { ok: false, reason: 'ledger_unavailable', infra: true, mirror: [] };
+  }
+
+  /**
+   * The claim escrows the ledger has QUARANTINED (unreadable ones are skipped: never mirrored on a guess).
+   * No new chunk is read after `until`: this runs on the HTTP path (the rest stay HELD, refused again next claim).
+   */
+  private async quarantinedOnLedger(ledger: LedgerClient, escrowIds: string[], until: number): Promise<string[]> {
+    const out: string[] = [];
+    for (let i = 0; i < escrowIds.length && Date.now() < until; i += 20) {
+      const chunk = escrowIds.slice(i, i + 20);
+      const reads = await Promise.all(chunk.map((id) => ledger.evaluate('GetEscrow', id)));
+      reads.forEach((r, j) => {
+        if (!r.ok) return;
+        try {
+          if ((JSON.parse(r.result) as { status?: string }).status === 'QUARANTINED') out.push(chunk[j]);
+        } catch {
+          // not a record: skipped
+        }
+      });
+    }
+    return out;
   }
 
   /** Waits for the alerts still being sent (tests, shutdown, CLI). */

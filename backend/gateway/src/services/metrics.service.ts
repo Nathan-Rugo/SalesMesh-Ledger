@@ -24,6 +24,8 @@ export class GatewayMetrics {
   readonly payoutClaims = { claimed: 0, paid: 0, failed: 0, unknown: 0, unresolved: 0, nameMismatch: 0, statusQueries: 0, reminders: 0, remindersFailed: 0 };
   /** Frozen-payout SLA escalation (spec gh-11, part 3c): items escalated, admin digests sent / failed. */
   readonly frozenSla = { escalated: 0, alertsSent: 0, alertsFailed: 0 };
+  /** Fabric ledger sync (DLT-03, #10): outbox deliveries and the AuthorisePayout claim gate. */
+  readonly ledger = { delivered: 0, retried: 0, dead: 0, superseded: 0, auditorReleased: 0, authorised: 0, authoriseRefused: 0, authoriseUnavailable: 0, mirrored: 0 };
   private readonly darajaLatency: number[] = [];
   globalLoginFailureAlarm = false;
 
@@ -42,6 +44,7 @@ export class GatewayMetrics {
       payouts: { ...this.payouts },
       payoutClaims: { ...this.payoutClaims },
       frozenSla: { ...this.frozenSla },
+      ledger: { ...this.ledger },
       darajaLatencyMs: { samples: sorted.length, p50: q(0.5), p95: q(0.95), max: sorted.length ? Math.round(sorted[sorted.length - 1]) : null },
     };
   }
