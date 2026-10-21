@@ -67,7 +67,7 @@ context:
 - [x] `docs/architecture/deployment.md` -- mermaid deployment diagram, RAM table, AWS cost, secrets map, mTLS/HTTPS paths, a step-by-step runbook, and a smoke checklist (`make fabric-ledger-e2e`, gateway `npm test -- --runInBand`, PWA `npm test`, one real sandbox STK payment → escrow matures → agent claim → B2C result → ledger `AuthorisePayout` committed).
 
 **Acceptance Criteria:**
-- Given a fresh t3.medium on Ubuntu 24.04, when the runbook is followed, then `https://<ip>.sslip.io` serves the PWA with a valid certificate and `/api/v1/health/ready` returns 200.
+- Given a fresh m7i-flex.large on Ubuntu 24.04, when the runbook is followed, then `https://<ip>.sslip.io` serves the PWA with a valid certificate and `/api/v1/health/ready` returns 200.
 - Given `FABRIC_ENABLED=true` and the commission chaincode deployed, when an agent claims, then the gateway logs a committed `AuthorisePayout` and the auditor peer can query it.
 - Given the repo, when grepping for keys/passwords, then only placeholders from `.env.example` are found.
 
@@ -121,7 +121,7 @@ Review 1 (blind = B, edge-case = E, verification-gap = V). Groups: G1 = gen_env 
 
 ## Design Notes
 
-AWS sizing: t3.medium (2 vCPU, 4 GB, x86 so there is no arm64 image risk) ≈ $0.042/h. Add a 30 GB gp3 volume and a public IPv4 ≈ $0.05/h in total. Stopped when idle, that is ~2000 running hours on $100. The RAM estimate is ~2.7 GB used, with 4 GB swap as headroom. t3.large (8 GB, ≈ $0.083/h) is the fallback if the OOM killer shows up.
+AWS sizing (changed 2026-10-21 at the user's request): m7i-flex.large (2 vCPU, 8 GB, x86 so there is no arm64 image risk, no CPU credits) ≈ $0.096/h. Add a 30 GB gp3 volume and a public IPv4 ≈ $0.104/h in total. Stopped when idle, that is ~900 running hours on $100. The RAM estimate is ~2.7 GB used of 8 GB, with 4 GB swap as a safety net. The `mem_limit`s still fit a t3.medium (4 GB, ≈ $0.042/h, credit spec standard), the original sizing, which stays as the cheaper fallback.
 
 ## Verification
 

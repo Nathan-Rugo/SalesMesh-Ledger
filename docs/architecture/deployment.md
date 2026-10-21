@@ -1,6 +1,6 @@
 # Deployment: the whole stack on one AWS EC2 VM (#56)
 
-The demo deployment runs everything on one `t3.medium` (2 vCPU, 4 GB, x86) with Ubuntu 24.04:
+The demo deployment runs everything on one `m7i-flex.large` (2 vCPU, 8 GB, x86) with Ubuntu 24.04:
 
 - the [Fabric testnet](fabric-testnet.md), started by its own scripts;
 - the app stack in `infra/docker-compose.yml`: Postgres, Redis, ml-engine, gateway, PWA and Caddy.
@@ -22,7 +22,7 @@ Caddy gets a Let's Encrypt certificate for `<elastic-ip>.sslip.io` (sslip.io res
 flowchart LR
   user["Agent / admin browser (PWA)"]
   daraja["Safaricom Daraja"]
-  subgraph vm["EC2 t3.medium (SG: 80, 443 open; 22 from your IP only)"]
+  subgraph vm["EC2 m7i-flex.large (SG: 80, 443 open; 22 from your IP only)"]
     caddy["caddy :80 / :443<br/>Let's Encrypt for &lt;ip&gt;.sslip.io"]
     subgraph app["Docker network salesmesh_default"]
       pwa["frontend :3000<br/>Next.js standalone"]
@@ -66,7 +66,7 @@ Only Caddy publishes ports to the internet. The testnet's `127.0.0.1:7051` is bo
 | Gateway → peer0.merchant | mTLS gRPC | The client cert and key are `gateway@merchant`'s TLS pair, and the peer is verified against the org TLS CA. Files are read from the read-only mount `/fabric/merchant` on every start ([fabric-testnet.md](fabric-testnet.md#connecting-10-gateway)). |
 | Gateway → Daraja / Africa's Talking | HTTPS (outbound) | |
 
-## Memory (4 GB VM + 4 GB swap)
+## Memory (8 GB VM + 4 GB swap)
 
 | Container | `mem_limit` | Typical use |
 |---|---|---|
@@ -81,21 +81,26 @@ Only Caddy publishes ports to the internet. The testnet's `127.0.0.1:7051` is bo
 | Ubuntu + Docker | n/a | ~0.5 GB |
 | **Total** | | **~2.7 GB used at peak** |
 
-The 4 GB swap file (`vm.swappiness=10`) is headroom for image builds and spikes. It is not meant as working memory. If `dmesg` shows the OOM killer, or a container exits with code 137, move to a `t3.large` (8 GB, ≈ $0.083/h): stop the instance, change the type, then start it again.
+About 2.7 GB of 8 GB is used at peak, so the stack runs in RAM with room for image builds (`next build` peaks around 1–1.5 GB). The 4 GB swap file (`vm.swappiness=10`) is a safety net, not working memory. If `dmesg` ever shows the OOM killer, or a container exits with code 137, raise that container's `mem_limit`; the VM has the headroom.
+
+The stack was first sized for a `t3.medium` (4 GB, ≈ $0.042/h), and the `mem_limit`s still fit it, so a t3.medium works as a cheaper fallback. It leans on swap during builds, and set its credit specification to **standard** so CPU bursts are not billed.
 
 ## AWS cost (us-east-1 prices; other regions differ a little)
 
 | Item | Running | Stopped |
 |---|---|---|
-| t3.medium, Linux, on demand, credit spec **standard** | $0.0416/h | $0 |
+| m7i-flex.large, Linux, on demand | ≈ $0.096/h | $0 |
 | 30 GB gp3 root volume ($0.08/GB-month) | ≈ $0.0033/h | ≈ $0.0033/h |
 | Public IPv4 / Elastic IP | $0.005/h | $0.005/h |
-| **Total** | **≈ $0.05/h** | **≈ $0.008/h (≈ $6/month)** |
+| **Total** | **≈ $0.104/h** | **≈ $0.008/h (≈ $6/month)** |
+
+Check these prices on the EC2 pricing page for your region before launching.
 
 - Data out is free up to 100 GB/month, which is far more than a demo uses.
-- $100 lasts about 2000 running hours if the VM is stopped when idle.
-- Left running 24/7, it costs ≈ $36/month. The credits are shared with other projects, which is why the runbook adds the budgets below.
-- Set the T3 credit specification to **standard**. The default, `unlimited`, bills CPU bursts beyond the baseline (`next build` is one of those bursts).
+- $100 lasts about 900 running hours if the VM is stopped when idle (≈ 40 full days of uptime).
+- Left running 24/7, it costs ≈ $76/month. That alone would eat most of the shared credits, which is why the runbook adds the budgets and the stop-when-idle step below.
+- Flex instances have no CPU credits to manage: there is no credit specification to set and no burst billing. They run at a 40 % baseline and can scale up to 100 % CPU most of the time, which is plenty for builds and demos.
+- On accounts on AWS's newer free plan, m7i-flex.large can be listed as *Free tier eligible*. If the launch wizard shows that badge, the instance hours may not draw on the credits; the budgets still catch anything that does.
 
 ## Secrets map
 
@@ -144,10 +149,9 @@ All console steps use one region (e.g. **us-east-1**). Tag every resource you cr
    Add nothing else. 7051, 5432, 6379 and 8000 are never opened.
 3. **EC2 → Launch instance:**
    - name `salesmesh`;
-   - AMI **Ubuntu Server 24.04 LTS (x86)**, type **t3.medium**;
+   - AMI **Ubuntu Server 24.04 LTS (x86)**, type **m7i-flex.large**;
    - key pair `salesmesh-key`, security group `salesmesh-sg`;
    - storage **30 GB gp3**, *Delete on termination* = yes;
-   - *Advanced details → Credit specification* = **Standard**;
    - *Resource tags*: `Project=salesmesh` on the **instance and volumes**.
 4. **EC2 → Elastic IPs → Allocate** (tag `Project=salesmesh`), then **Associate** it with the instance. Your host is `<elastic-ip>.sslip.io`, for example `203.0.113.10.sslip.io`. The Elastic IP keeps the host, and therefore the certificate and the Daraja URLs, stable across stop and start.
 
@@ -199,7 +203,6 @@ docker compose --env-file .env -f infra/docker-compose.yml exec gateway npm run 
 bash infra/scripts/deploy/smoke.sh                                       # SMOKE PASS
 ```
 
-- With credit spec *standard*, the first build slows to the 20 % CPU baseline once the burst credits run out, and can then take much longer than 10 minutes. If that happens, temporarily set *Actions → Instance settings → Change credit specification* to **unlimited** for the first build, then set it back to **standard**.
 - Postgres runs `infra/scripts/init_db.sql` on its first start (empty volume). After a `git pull` with new migrations, run `make migrate`. Do not run `make seed` against this database.
 - Register the C2B validation URL (`DARAJA_C2B_VALIDATION_URL` in `.env`) in the Daraja portal if you use C2B.
 - Logs: `make deploy-logs`. Update: `git pull && make deploy-up`.

@@ -2,7 +2,7 @@
 # Run from the repo root with the root .env for interpolation:
 #   docker compose --env-file .env -f infra/docker-compose.yml up -d --build
 # With the Fabric ledger, add -f infra/docker-compose.fabric.yml (make deploy-up).
-# Only Caddy publishes ports (80/443). Memory limits sum to ~1.8 GB, the app's share of a 4 GB VM.
+# Only Caddy publishes ports (80/443). Memory limits sum to ~1.8 GB, sized so the stack also fits a 4 GB VM.
 name: salesmesh
 
 x-app: &app
