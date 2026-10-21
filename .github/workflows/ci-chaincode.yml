@@ -23,15 +23,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: blockchain/chaincode/go.mod
+          # Latest 1.27 patch, the chaincode images' builder (golang:1.27-alpine): govulncheck also checks the stdlib.
+          go-version: '1.27.x'
+          check-latest: true
           cache-dependency-path: blockchain/chaincode/go.sum
       - name: Commission chaincode unit tests (vet, race, coverage)
         run: make fabric-chaincode-test
       - name: Known vulnerabilities in reachable code (govulncheck)
-        working-directory: blockchain/chaincode
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-          govulncheck ./...
+          (cd blockchain/chaincode && govulncheck ./...)
+          (cd blockchain/network/smoke-chaincode && govulncheck ./...)
 
   smoke:
     runs-on: ubuntu-latest
