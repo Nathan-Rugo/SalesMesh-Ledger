@@ -30,11 +30,12 @@ check "gateway readiness" 200 "https://$host/api/v1/health/ready"
 check "HTTP redirects to HTTPS" 308 "http://$host/offline"
 check "callback with a wrong token" 404 -X POST -H 'Content-Type: application/json' -d '{}' \
   "https://$host/api/v1/mpesa/callback/smoke-wrong-token"
-# Only /api/* reaches the gateway, so its /health/details falls through to the PWA's 404.
-check "gateway /health/details not exposed" 404 "https://$host/health/details"
+# /health/details (metrics) must not be reachable under any proxied /api path.
+check "/api/v1/health/details not exposed" 404 "https://$host/api/v1/health/details"
+check "/api/health/details not exposed" 404 "https://$host/api/health/details"
 
 if [[ ${INSECURE:-0} != 1 ]]; then
-  end=$(echo | openssl s_client -connect "$host:443" -servername "$host" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+  end=$(echo | timeout 15 openssl s_client -connect "$host:443" -servername "$host" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
   if [[ -n $end ]]; then echo "ok   certificate valid until $end"; else echo "FAIL cannot read the certificate"; fails=$((fails + 1)); fi
 fi
 

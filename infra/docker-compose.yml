@@ -26,7 +26,7 @@ services:
       # Runs once, on an empty data volume only (records every migration as applied).
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init_db.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -40,7 +40,7 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
     # Config from stdin keeps the password off the process command line.
     # noeviction: a full Redis refuses writes (the gateway falls back to Postgres) instead of dropping idempotency keys.
-    command: ["sh", "-c", "printf 'requirepass %s\\nappendonly yes\\nmaxmemory 64mb\\nmaxmemory-policy noeviction\\n' \"$$REDIS_PASSWORD\" | exec redis-server -"]
+    command: ["sh", "-c", "printf 'requirepass %s\\nappendonly yes\\nmaxmemory 40mb\\nmaxmemory-policy noeviction\\n' \"$$REDIS_PASSWORD\" | exec redis-server -"]
     volumes:
       - redis_data:/data
     healthcheck:
