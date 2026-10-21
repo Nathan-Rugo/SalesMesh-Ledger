@@ -2,7 +2,7 @@
 title: 'Deployment topology: whole stack on one AWS EC2 VM'
 type: 'feature'
 created: '2026-10-21'
-status: 'in-progress'
+status: 'done'
 route: 'dispatch'
 baseline_commit: '221c0e2114c6a9310349ee33c72a2306d0ec161d'
 issue: 56
@@ -56,15 +56,15 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `infra/docker-compose.yml` -- write the app stack with healthchecks, `depends_on: condition: service_healthy`, `mem_limit`s (pg 384m, redis 96m, ml 640m, gateway 384m, pwa 256m, caddy 64m) -- the fixed 4 GB budget.
-- [ ] `infra/docker-compose.fabric.yml` -- Fabric overlay -- keeps `FABRIC_ENABLED=false` runs working without the network.
-- [ ] `infra/caddy/Caddyfile` -- one origin plus auto TLS -- same-site refresh cookie, Daraja HTTPS.
-- [ ] `infra/scripts/deploy/bootstrap_vm.sh` -- Docker, swap, clone -- one command on a fresh VM.
-- [ ] `infra/scripts/deploy/gen_env.sh` -- generate `.env` with random secrets, the sslip host and literal-token URLs -- no hand-made secrets; refuses to overwrite.
-- [ ] `infra/scripts/deploy/smoke.sh` -- curl `/health/ready` through Caddy, the `/offline` PWA page, TLS validity and the callback route 404 on a bad token -- the quick post-deploy check.
-- [ ] `.env.example`, `Makefile` -- the deploy section and the `deploy-*` targets.
-- [ ] Delete `infra/docker-compose.override.yml` and `infra/nginx/` -- empty, unused.
-- [ ] `docs/architecture/deployment.md` -- mermaid deployment diagram, RAM table, AWS cost, secrets map, mTLS/HTTPS paths, a step-by-step runbook, and a smoke checklist (`make fabric-ledger-e2e`, gateway `npm test -- --runInBand`, PWA `npm test`, one real sandbox STK payment → escrow matures → agent claim → B2C result → ledger `AuthorisePayout` committed).
+- [x] `infra/docker-compose.yml` -- write the app stack with healthchecks, `depends_on: condition: service_healthy`, `mem_limit`s (pg 384m, redis 96m, ml 640m, gateway 384m, pwa 256m, caddy 64m) -- the fixed 4 GB budget.
+- [x] `infra/docker-compose.fabric.yml` -- Fabric overlay -- keeps `FABRIC_ENABLED=false` runs working without the network.
+- [x] `infra/caddy/Caddyfile` -- one origin plus auto TLS -- same-site refresh cookie, Daraja HTTPS.
+- [x] `infra/scripts/deploy/bootstrap_vm.sh` -- Docker, swap, clone -- one command on a fresh VM.
+- [x] `infra/scripts/deploy/gen_env.sh` -- generate `.env` with random secrets, the sslip host and literal-token URLs -- no hand-made secrets; refuses to overwrite.
+- [x] `infra/scripts/deploy/smoke.sh` -- curl `/health/ready` through Caddy, the `/offline` PWA page, TLS validity and the callback route 404 on a bad token -- the quick post-deploy check.
+- [x] `.env.example`, `Makefile` -- the deploy section and the `deploy-*` targets.
+- [x] Delete `infra/docker-compose.override.yml` and `infra/nginx/` -- empty, unused.
+- [x] `docs/architecture/deployment.md` -- mermaid deployment diagram, RAM table, AWS cost, secrets map, mTLS/HTTPS paths, a step-by-step runbook, and a smoke checklist (`make fabric-ledger-e2e`, gateway `npm test -- --runInBand`, PWA `npm test`, one real sandbox STK payment → escrow matures → agent claim → B2C result → ledger `AuthorisePayout` committed).
 
 **Acceptance Criteria:**
 - Given a fresh t3.medium on Ubuntu 24.04, when the runbook is followed, then `https://<ip>.sslip.io` serves the PWA with a valid certificate and `/api/v1/health/ready` returns 200.
@@ -81,6 +81,43 @@ context:
 ## Spec Change Log
 
 ## Review Triage Log
+
+Review 1 (blind = B, edge-case = E, verification-gap = V). Groups: G1 = gen_env `--force` semantics, G2 = temp-file secrets, G3 = idle/resume doc, G4 = Redis memory, G5 = CI static checks, G6 = uid 1000 assumption.
+
+| # | Finding | Verdict | Evidence | Route |
+|---|---------|---------|----------|-------|
+| B1 | `--force` regenerates DB/Redis/HMAC secrets and drops hand-entered Daraja/AT creds | high | `gen_env.sh` rebuilds from `.env.example`; `POSTGRES_PASSWORD` only applies on an empty `pg_data` → gateway auth fails; doc calls `--force` "start over" | patch (G1) |
+| B2 | No way to change the host without `--force` | medium | host-derived keys only written by full regen; EIP attached after gen_env is plausible | patch (G1) |
+| B3 | `$tmp.n` created with default umask; not in trap | low | awk redirect uses process umask; trap removes only `$tmp` | patch (G2) |
+| B4 | Stop-when-idle suggests `deploy-down` but resume assumes restart | medium | doc line 202 vs 207: removed containers do not restart | patch (G3) |
+| B5 | Token can reach Caddy error logs | medium | Caddy's default logger records `reverse_proxy` errors with the request URI; Caddyfile/doc claim no log carries the token | patch |
+| B6 | Smoke `/health/details` check can never fail | low | non-`/api` path never reaches gateway; direct correction to probe `/api/...` paths | patch |
+| B7 | No backup before teardown/destructive steps | low | teardown deletes the only data copy; one-line `pg_dump` step | patch |
+| B8 | `MODEL_SHA256` silently empty after model bump | low | path hardcoded to v1.0.0 sha file; warn on miss is direct | patch |
+| B9 | Spec checks not in CI | medium | no workflow runs compose config / shellcheck | patch (G5) |
+| B10 | `/health/details` monitoring command missing | low | doc line 111 elides the command; image has no curl | patch |
+| B11 | No HSTS / security headers at edge | false | `frontend/next.config` sets HSTS (prod) and other headers on all routes | reject |
+| B12 | Redis AOF fork may OOM under 96m | low | 64mb maxmemory + fork CoW under 96m cap; lowering maxmemory is a direct correction | patch (G4) |
+| B13 | First-build time assumes CPU credits | low | standard credits throttle to 20 % baseline; doc note | patch |
+| E1 | `--force` → Postgres auth crash loop | high | same as B1 | patch (G1) |
+| E2 | `--force` drops Daraja/AT creds | high | same as B1 | patch (G1) |
+| E3 | `--force` rotates HMAC keys under same KEY_ID | high | same as B1 | patch (G1) |
+| E4 | Backup name collides within one second | low | `date +%Y%m%d%H%M%S`; append `$$` is a direct correction | patch |
+| E5 | `$tmp.n` left on failure | low | same as B3 | patch (G2) |
+| E6 | JWT key unreadable if login uid ≠ 1000 | low | key mode 600, gateway runs as `node` uid 1000 | patch (G6) |
+| E7 | `.env` written before JWT key; key failure blocks re-run | low | reorder is a direct correction | patch |
+| E8 | Partial swapfile blocks re-run | low | needs a crash between fallocate and swapon; fix adds branches; unlikely | reject |
+| E9 | `pg_isready` passes on initdb's socket-only temp server | medium | docker-entrypoint temp server listens on the socket only; gateway starts early and crash-restarts once; `-h 127.0.0.1` is direct | patch |
+| E10 | Redis OOM on AOF rewrite | low | same as B12 | patch (G4) |
+| E11 | Unhealthy ml-engine blocks the whole stack | false | `depends_on` only gates `up`, which fails loudly ("dependency failed"); spec mandates `service_healthy` | reject |
+| E12 | `make up` with `FABRIC_ENABLED=true` restart-loops | low | operator error the runbook already covers (line 197); fix adds a Makefile guard | reject |
+| E13 | `make up` without root `.env` errors cryptically | low | compose names the missing env file; `:?` messages already explain; guard adds complexity | reject |
+| E14 | Resume after `deploy-down` fails | medium | same as B4 | patch (G3) |
+| E15 | `openssl s_client` can hang | low | no timeout on filtered 443; `timeout 15` is direct | patch |
+| V1 | `gen_env.sh` has no automated test | medium | pre-verified: no test or workflow runs it; Daraja URL suffix contract unguarded | patch (G5) |
+| V2 | Compose/overlay/scripts never statically validated | medium | pre-verified: no workflow runs `config -q`/shellcheck | patch (G5) |
+| V3 | `--force` breaks existing deployment | high | same as B1 | patch (G1) |
+| V4 | Bind-mounted secrets readable only via uid 1000 match | low | same as E6 | patch (G6) |
 
 ## Design Notes
 
