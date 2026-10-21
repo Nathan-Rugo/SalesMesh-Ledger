@@ -8,6 +8,7 @@
 import { SECURITY_HOLD_EVENTS, type SecurityEventType } from '../domain/security_events';
 import type { Db, TxDb } from './db.types';
 import { withTransaction } from './db.types';
+import { enqueueQuarantine } from './ledger.repository';
 import { penaliseReceipt } from './trust.repository';
 
 // The event types live in a leaf module (trust.repository needs them too, without an import cycle).
@@ -40,23 +41,26 @@ export async function securityHoldReceipt(
   db: Db,
   receipt: string
 ): Promise<{ held: number; released: Array<{ escrowId: string; amount: string }> }> {
-  const { rowCount } = await db.query(
+  const { rows: moved } = await db.query<{ escrow_id: string; escrow_status: string }>(
     `UPDATE escrow_accounts e
         SET escrow_status = CASE WHEN e.escrow_status = 'CLAIMED' THEN 'CLAIMED' ELSE 'QUARANTINED' END,
             quarantine_reason = CASE WHEN e.escrow_status = 'CLAIMED' THEN e.quarantine_reason ELSE 'security_hold' END,
             security_hold = TRUE, rescore_claimed_at = NULL, rescore_claim_token = NULL
        FROM transactions t
       WHERE t.transaction_id = e.transaction_id AND t.mpesa_receipt_id = $1
-        AND e.escrow_status NOT IN ('RELEASED', 'REMITTED') AND NOT (e.escrow_status IN ('QUARANTINED', 'CLAIMED') AND e.security_hold)`,
+        AND e.escrow_status NOT IN ('RELEASED', 'REMITTED') AND NOT (e.escrow_status IN ('QUARANTINED', 'CLAIMED') AND e.security_hold)
+      RETURNING e.escrow_id, e.escrow_status`,
     [receipt]
   );
+  // DLT-03: the ledger hears of it now; a CLAIMED escrow is listed in its payout's Settle FAILED instead.
+  for (const m of moved) if (m.escrow_status === 'QUARANTINED') await enqueueQuarantine(db, m.escrow_id, 'security_hold');
   const { rows } = await db.query<{ escrow_id: string; amount: string }>(
     `SELECT e.escrow_id, t.amount::text AS amount FROM escrow_accounts e JOIN transactions t USING (transaction_id)
       WHERE t.mpesa_receipt_id = $1 AND e.escrow_status IN ('RELEASED', 'CLAIMED', 'REMITTED')`,
     [receipt]
   );
   await penaliseReceipt(db, receipt);
-  return { held: rowCount ?? 0, released: rows.map((r) => ({ escrowId: r.escrow_id, amount: r.amount })) };
+  return { held: moved.length, released: rows.map((r) => ({ escrowId: r.escrow_id, amount: r.amount })) };
 }
 
 /**

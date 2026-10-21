@@ -5,13 +5,17 @@
  * PAYOUT_STATUS_CHANGED security event commit together. At most one open (SENT / UNKNOWN /
  * UNRESOLVED) payout per agent: claims are serialised on the agent row, backed by a partial unique
  * index. Lock order everywhere: escrow rows, then the agent row (as securityHoldReceipt does).
+ * Fabric ledger (DLT-03, #10): with FABRIC_ENABLED a claim takes only escrows already on the ledger as
+ * Postgres has them; PAID / FAILED of an authorised payout queue its SettlePayout (same transaction).
  */
 
 import type { PoolClient, QueryResultRow } from 'pg';
 import type { B2cOutcome, B2cResult, TransactionStatusResult } from '../daraja/client';
 import { consentHash, splitClaim, type PayoutStatus } from '../domain/payout';
 import { maskMsisdn, namesMatch } from '../domain/payout_destination';
+import { fabricEnabled } from '../config/fabric';
 import { withTransaction, type Db, type TxDb } from './db.types';
+import { enqueueQuarantine, enqueueSettle, LEDGER_UNSYNCED, mirrorAuditorHold, supersedePending } from './ledger.repository';
 import { insertSubjectSecurityEvent } from './security.repository';
 
 export interface PayoutRow {
@@ -34,6 +38,8 @@ export interface PayoutRow {
   statusAttempts: number;
   createdAt: Date;
   resolvedAt: Date | null;
+  /** The committed AuthorisePayout tx (DLT-03); null when the ledger never authorised it. */
+  ledgerTxId: string | null;
 }
 
 /** A changed payout and the agent's login user (the event subject). */
@@ -51,7 +57,7 @@ export type ClaimOutcome =
   | { kind: 'destination_changing' }
   | { kind: 'below_minimum'; amount: number }
   | { kind: 'above_maximum' }
-  | ({ kind: 'created'; escrows: number } & PayoutChange);
+  | ({ kind: 'created'; escrows: number; escrowIds: string[] } & PayoutChange);
 
 export type ResultOutcome =
   | { kind: 'unknown' }
@@ -70,7 +76,7 @@ export interface StatusLease {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const COLS = `p.payout_id, p.agent_id, p.destination_id, p.msisdn, p.amount, p.gross_cents, p.carry_in_cents, p.carry_out_cents,
               p.status, p.failure_reason, p.disclosure_version, p.consent_hash, p.accepted_at, p.conversation_id, p.receipt,
-              p.result_code, p.status_attempts, p.created_at, p.resolved_at`;
+              p.result_code, p.status_attempts, p.created_at, p.resolved_at, p.ledger_tx_id`;
 const RETURNING = COLS.replace(/p\./g, '');
 const OPEN = `('SENT', 'UNKNOWN', 'UNRESOLVED')`;
 
@@ -96,6 +102,7 @@ function toRow(r: QueryResultRow): PayoutRow {
     statusAttempts: Number(r.status_attempts),
     createdAt: new Date(r.created_at),
     resolvedAt: date(r.resolved_at),
+    ledgerTxId: r.ledger_tx_id ?? null,
   };
 }
 
@@ -111,12 +118,20 @@ async function event(db: Db, userId: string, p: PayoutRow, what: string): Promis
 export const CLAIMABLE = (e: string) =>
   `${e}.escrow_status = 'HELD' AND NOT ${e}.security_hold AND ${e}.gross_commission > 0 AND ${e}.ufaa_return_id IS NULL`;
 
+/**
+ * Ready to claim: matured. With the ledger on (DLT-03), also no undelivered outbox row (the ledger
+ * has the escrow as Postgres does) and 5 min past due, so a gateway clock ahead of the ledger's tx
+ * time cannot build a claim AuthorisePayout refuses as NOT_MATURED.
+ */
+const READY = (e: string, ledger: boolean): string =>
+  ledger ? `(${e}.release_due_at <= NOW() - INTERVAL '5 minutes' AND NOT ${LEDGER_UNSYNCED(e)})` : `${e}.release_due_at <= NOW()`;
+
 /** Matured HELD escrows of the agent, not security-held, oldest first, in cents. */
-export async function claimableEscrows(db: Db, agentId: string, lock = false): Promise<Array<{ escrowId: string; cents: number }>> {
+export async function claimableEscrows(db: Db, agentId: string, lock = false, ledger = fabricEnabled()): Promise<Array<{ escrowId: string; cents: number }>> {
   const { rows } = await db.query(
     `SELECT e.escrow_id, (e.gross_commission * 100)::bigint AS cents
        FROM escrow_accounts e JOIN transactions t USING (transaction_id)
-      WHERE t.agent_id = $1 AND ${CLAIMABLE('e')} AND e.release_due_at <= NOW()
+      WHERE t.agent_id = $1 AND ${CLAIMABLE('e')} AND ${READY('e', ledger)}
       ORDER BY e.release_due_at, e.escrow_id${lock ? ' FOR UPDATE OF e' : ''}`,
     [agentId]
   );
@@ -135,9 +150,10 @@ export interface Accrual {
 /**
  * Commission not (yet) in the claimable balance (spec gh-13): unmatured or security-held HELD,
  * QUARANTINED, CLAIMED; soonest maturity first, at most `limit`. `pendingCount`/`pendingCents`
- * total every unmatured claimable HELD escrow (not capped by `limit`).
+ * total every unmatured claimable HELD escrow (not capped by `limit`). With the ledger on, an escrow
+ * not yet on the ledger counts as pending too.
  */
-export async function pendingAccruals(db: Db, agentId: string, limit = 50): Promise<{ accruals: Accrual[]; pendingCount: number; pendingCents: number }> {
+export async function pendingAccruals(db: Db, agentId: string, limit = 50, ledger = fabricEnabled()): Promise<{ accruals: Accrual[]; pendingCount: number; pendingCents: number }> {
   const [{ rows }, { rows: [t] }] = await Promise.all([
     db.query(
       `SELECT e.escrow_id, (e.gross_commission * 100)::bigint AS cents, e.release_due_at,
@@ -145,14 +161,14 @@ export async function pendingAccruals(db: Db, agentId: string, limit = 50): Prom
               CASE WHEN e.security_hold THEN COALESCE(e.quarantine_reason, 'security_hold') ELSE e.quarantine_reason END AS quarantine_reason
          FROM escrow_accounts e JOIN transactions t USING (transaction_id)
         WHERE t.agent_id = $1 AND e.gross_commission > 0 AND e.ufaa_return_id IS NULL
-          AND ((e.escrow_status = 'HELD' AND (e.security_hold OR e.release_due_at > NOW())) OR e.escrow_status IN ('QUARANTINED', 'CLAIMED'))
+          AND ((e.escrow_status = 'HELD' AND (e.security_hold OR NOT ${READY('e', ledger)})) OR e.escrow_status IN ('QUARANTINED', 'CLAIMED'))
         ORDER BY e.release_due_at, e.escrow_id LIMIT $2`,
       [agentId, limit]
     ),
     db.query(
       `SELECT count(*)::int AS n, COALESCE(sum((e.gross_commission * 100)::bigint), 0)::bigint AS cents
          FROM escrow_accounts e JOIN transactions t USING (transaction_id)
-        WHERE t.agent_id = $1 AND ${CLAIMABLE('e')} AND e.release_due_at > NOW()`,
+        WHERE t.agent_id = $1 AND ${CLAIMABLE('e')} AND NOT ${READY('e', ledger)}`,
       [agentId]
     ),
   ]);
@@ -190,10 +206,10 @@ export async function payoutContext(db: Db, agentId: string): Promise<{ carryCen
  */
 export async function createPayout(
   db: TxDb,
-  c: { agentId: string; payoutId: string; acceptedAt: Date; disclosureVersion: string; disclosureText: string; minAmount: number; maxAmount: number }
+  c: { agentId: string; payoutId: string; acceptedAt: Date; disclosureVersion: string; disclosureText: string; minAmount: number; maxAmount: number; ledger?: boolean }
 ): Promise<ClaimOutcome> {
   return withTransaction(db, async (tx) => {
-    const escrows = await claimableEscrows(tx, c.agentId, true);
+    const escrows = await claimableEscrows(tx, c.agentId, true, c.ledger ?? fabricEnabled());
     const { rows: [agent] } = await tx.query(
       `SELECT a.user_id, a.payout_carry_cents, u.disabled_at IS NOT NULL AS disabled
          FROM sales_agents a JOIN users u ON u.user_id = a.user_id WHERE a.agent_id = $1 FOR UPDATE OF a`,
@@ -236,26 +252,37 @@ export async function createPayout(
     await tx.query(`UPDATE escrow_accounts SET escrow_status = 'CLAIMED', payout_id = $1 WHERE escrow_id = ANY($2::uuid[])`, [c.payoutId, split.escrowIds]);
     const payout = toRow(ins);
     await event(tx, agent.user_id, payout, `claimed (${split.escrowIds.length} escrow(s), disclosure v${c.disclosureVersion}); payment requested`);
-    return { kind: 'created', escrows: split.escrowIds.length, payout, userId: agent.user_id } as const;
+    return { kind: 'created', escrows: split.escrowIds.length, escrowIds: split.escrowIds, payout, userId: agent.user_id } as const;
   });
 }
 
 type Final = { status: 'PAID'; receipt: string | null; resultCode: string | null } | { status: 'FAILED'; reason: string; resultCode: string | null };
 
+type Settled = { payout: PayoutRow; escrows: Array<{ escrowId: string; securityHold: boolean }> };
+
 /**
  * PAID: escrows RELEASED, the agent's carry becomes carry_out. FAILED: escrows HELD again (or
  * QUARANTINED when security-held mid-flight), and a CLAWBACK_DUE / RELEASED_NOT_ON_STATEMENT
- * recorded for them is resolved (nothing was paid). The caller holds the payout row lock.
+ * recorded for them is resolved (nothing was paid). A payout the ledger authorised queues its
+ * SettlePayout (FAILED lists the security-held escrows). One it never authorised (claimed with the
+ * ledger off) keeps the ledger in step without a Settle: FAILED queues a Quarantine per security-held
+ * escrow; PAID supersedes its escrows' still-PENDING rows (like pre-#10 history, never published as
+ * HELD). `ledgerHooks` false: the rollback queues its own rows. The caller holds the payout row lock.
  */
-async function finish(tx: PoolClient, cur: PayoutRow, userId: string, f: Final, what: string): Promise<PayoutRow> {
+async function finish(tx: PoolClient, cur: PayoutRow, userId: string, f: Final, what: string, ledgerHooks = true): Promise<Settled> {
   const { rows: [upd] } = await tx.query(
     `UPDATE payouts SET status = $2, receipt = COALESCE($3, receipt), result_code = COALESCE($4, result_code), failure_reason = $5,
             resolved_at = NOW(), updated_at = NOW(), status_claimed_at = NULL, status_claim_token = NULL, next_status_at = NULL
       WHERE payout_id = $1 RETURNING ${RETURNING}`,
     [cur.payoutId, f.status, f.status === 'PAID' ? f.receipt : null, f.resultCode, f.status === 'FAILED' ? f.reason.slice(0, 40) : null]
   );
+  let escrows: Settled['escrows'];
   if (f.status === 'PAID') {
-    await tx.query(`UPDATE escrow_accounts SET escrow_status = 'RELEASED' WHERE payout_id = $1 AND escrow_status = 'CLAIMED'`, [cur.payoutId]);
+    const { rows } = await tx.query(
+      `UPDATE escrow_accounts SET escrow_status = 'RELEASED' WHERE payout_id = $1 AND escrow_status = 'CLAIMED' RETURNING escrow_id, security_hold`,
+      [cur.payoutId]
+    );
+    escrows = rows.map((r) => ({ escrowId: r.escrow_id, securityHold: r.security_hold }));
     await tx.query(`UPDATE sales_agents SET payout_carry_cents = $2 WHERE agent_id = $1`, [cur.agentId, cur.carryOutCents]);
   } else {
     const { rows: back } = await tx.query(
@@ -263,18 +290,77 @@ async function finish(tx: PoolClient, cur: PayoutRow, userId: string, f: Final, 
           SET escrow_status = CASE WHEN security_hold THEN 'QUARANTINED' ELSE 'HELD' END,
               quarantine_reason = CASE WHEN security_hold THEN 'security_hold' ELSE quarantine_reason END,
               payout_id = NULL
-        WHERE payout_id = $1 AND escrow_status = 'CLAIMED' RETURNING escrow_id`,
+        WHERE payout_id = $1 AND escrow_status = 'CLAIMED' RETURNING escrow_id, security_hold`,
       [cur.payoutId]
     );
+    escrows = back.map((r) => ({ escrowId: r.escrow_id, securityHold: r.security_hold }));
     await tx.query(
       `UPDATE reconciliation_exceptions SET resolved_at = NOW(), detail = left(COALESCE(detail, '') || $2, 2000)
         WHERE escrow_id = ANY($1::uuid[]) AND resolved_at IS NULL`,
       [back.map((r) => r.escrow_id), ` [resolved: payout ${cur.payoutId} FAILED, nothing was paid]`]
     );
   }
+  if (cur.ledgerTxId) {
+    await enqueueSettle(
+      tx,
+      cur.payoutId,
+      escrows.map((e) => e.escrowId),
+      f.status === 'PAID'
+        ? { outcome: 'PAID' }
+        : { outcome: 'FAILED', failureCode: f.reason, quarantineEscrowIds: escrows.filter((e) => e.securityHold).map((e) => e.escrowId) }
+    );
+  } else if (ledgerHooks && f.status === 'FAILED') {
+    for (const e of escrows) if (e.securityHold) await enqueueQuarantine(tx, e.escrowId, 'security_hold');
+  } else if (ledgerHooks) {
+    await supersedePending(tx, escrows.map((e) => e.escrowId), 'paid before the ledger was enabled');
+  }
   const payout = toRow(upd);
   await event(tx, userId, payout, what);
-  return payout;
+  return { payout, escrows };
+}
+
+/** A rollback's Settle FAILED waits this long after the last Authorise attempt (a late commit lands first). */
+export const ROLLBACK_SETTLE_DELAY_MS = 5 * 60_000;
+
+/**
+ * The claim gate failed closed (DLT-03): the SENT payout, never sent to B2C, becomes FAILED (`reason`)
+ * with finish()'s FAILED semantics. `infra`: the Authorise may still commit, so a Settle FAILED is
+ * queued (delayed; on NOT_FOUND it is done only when none of the recorded Authorise tx ids committed),
+ * unless no Authorise attempt was ever endorsed. Security-held escrows get a ledger Quarantine after
+ * it. `mirror`: escrows the ledger has QUARANTINED become `auditor_hold`. Null when the payout moved on.
+ */
+export async function rollbackClaim(
+  db: TxDb,
+  payoutId: string,
+  r: { reason: string; infra: boolean; mirror: string[] }
+): Promise<(PayoutChange & { mirrored: string[] }) | null> {
+  return withTransaction(db, async (tx) => {
+    const cur = await lockPayout(tx, 'payout_id', payoutId);
+    if (!cur || cur.payout.status !== 'SENT' || cur.payout.ledgerTxId) return null;
+    const { payout, escrows } = await finish(
+      tx,
+      cur.payout,
+      cur.userId,
+      { status: 'FAILED', reason: r.reason, resultCode: null },
+      `failed (${r.reason}): not authorised on the ledger, nothing was sent; escrows claimable again`,
+      false
+    );
+    const held = escrows.filter((e) => e.securityHold).map((e) => e.escrowId);
+    const { rows: [t] } = await tx.query(`SELECT ledger_authorise_tx_ids FROM payouts WHERE payout_id = $1`, [payoutId]);
+    const txIds: string[] = t.ledger_authorise_tx_ids ?? [];
+    if (r.infra && txIds.length > 0) {
+      await enqueueSettle(
+        tx,
+        payoutId,
+        escrows.map((e) => e.escrowId),
+        { outcome: 'FAILED', failureCode: r.reason, quarantineEscrowIds: held },
+        { absentTxIds: txIds, delayMs: ROLLBACK_SETTLE_DELAY_MS }
+      );
+    }
+    for (const id of held) await enqueueQuarantine(tx, id, 'security_hold');
+    const mirrored = await mirrorAuditorHold(tx, r.mirror);
+    return { payout, userId: cur.userId, mirrored };
+  });
 }
 
 /** Locks one payout (by id, or by any Transaction Status query id it was issued) with its agent's user and name. */
@@ -302,7 +388,7 @@ async function closed(tx: PoolClient, cur: { payout: PayoutRow; userId: string }
 }
 
 async function paid(tx: PoolClient, cur: { payout: PayoutRow; userId: string; fullName: string }, receipt: string | null, resultCode: string, name: string | null, via: string) {
-  const payout = await finish(tx, cur.payout, cur.userId, { status: 'PAID', receipt, resultCode }, `paid (${via}), receipt ${receipt ?? 'unknown'}`);
+  const { payout } = await finish(tx, cur.payout, cur.userId, { status: 'PAID', receipt, resultCode }, `paid (${via}), receipt ${receipt ?? 'unknown'}`);
   // No name parameter is no evidence of drift.
   const nameMismatch = name !== null && !namesMatch(name, cur.fullName);
   if (nameMismatch) {
@@ -340,7 +426,7 @@ export async function recordPayoutSend(db: TxDb, payoutId: string, outcome: B2cO
       await event(tx, cur.userId, payout, `send outcome unknown (${outcome.code}); never resent, Transaction Status will decide`);
       return { payout, userId: cur.userId };
     }
-    const payout = await finish(tx, cur.payout, cur.userId, { status: 'FAILED', reason: failReason, resultCode: outcome.code.slice(0, 20) }, `failed (${failReason}); escrows claimable again`);
+    const { payout } = await finish(tx, cur.payout, cur.userId, { status: 'FAILED', reason: failReason, resultCode: outcome.code.slice(0, 20) }, `failed (${failReason}); escrows claimable again`);
     return { payout, userId: cur.userId };
   });
 }
@@ -356,7 +442,7 @@ export async function applyPayoutResult(db: TxDb, result: B2cResult): Promise<Re
     if (!isOpen(cur.payout.status)) return closed(tx, cur, result.resultCode === '0' ? 'PAID' : 'FAILED', 'B2C result');
     if (result.resultCode === '0') return paid(tx, cur, result.receipt, '0', result.receiverName, 'B2C result');
     const reason = `b2c_${result.resultCode}`;
-    const payout = await finish(tx, cur.payout, cur.userId, { status: 'FAILED', reason, resultCode: result.resultCode }, `failed (${reason}); escrows claimable again`);
+    const { payout } = await finish(tx, cur.payout, cur.userId, { status: 'FAILED', reason, resultCode: result.resultCode }, `failed (${reason}); escrows claimable again`);
     return { kind: 'applied', payout, userId: cur.userId } as const;
   });
 }
@@ -371,7 +457,7 @@ export async function applyStatusResult(db: TxDb, r: TransactionStatusResult): P
     if (r.outcome === 'PAID') return paid(tx, cur, r.receipt, '0', r.receiverName, 'Transaction Status');
     if (r.outcome === 'FAILED') {
       const reason = `ts_${r.transactionStatus.toLowerCase()}`;
-      const payout = await finish(tx, cur.payout, cur.userId, { status: 'FAILED', reason, resultCode: r.resultCode }, `failed (${reason}); escrows claimable again`);
+      const { payout } = await finish(tx, cur.payout, cur.userId, { status: 'FAILED', reason, resultCode: r.resultCode }, `failed (${reason}); escrows claimable again`);
       return { kind: 'applied', payout, userId: cur.userId } as const;
     }
     await tx.query(`UPDATE payouts SET last_status_result = $2, updated_at = NOW() WHERE payout_id = $1`, [
@@ -463,7 +549,7 @@ export async function resolvePayout(
     const cur = await lockPayout(tx, 'payout_id', id);
     if (!cur) return { kind: 'not_found' } as const;
     if (cur.payout.status !== 'UNRESOLVED') return { kind: 'not_unresolved', status: cur.payout.status } as const;
-    const payout = o.paid
+    const { payout } = o.paid
       ? await finish(tx, cur.payout, cur.userId, { status: 'PAID', receipt: o.receipt, resultCode: null }, `paid (resolved by admin ${operator}), receipt ${o.receipt}`)
       : await finish(tx, cur.payout, cur.userId, { status: 'FAILED', reason: 'admin_failed', resultCode: null }, `failed (resolved by admin ${operator}); escrows claimable again`);
     return { kind: 'resolved', payout, userId: cur.userId } as const;
@@ -491,7 +577,9 @@ export interface DueReminder {
  * floor(balance) below `minAmount`. A claim moves that escrow out of HELD, so the next cycle keys a
  * new escrow at stage 0; a FAILED payout returns it with its stage, so nothing repeats.
  */
-export async function dueReminders(db: Db, q: { stages: readonly number[]; minAmount: number; limit: number }): Promise<DueReminder[]> {
+export async function dueReminders(db: Db, q: { stages: readonly number[]; minAmount: number; limit: number; ledger?: boolean }): Promise<DueReminder[]> {
+  // With the ledger on, only what a claim would take (READY) counts: no text for a balance the claim refuses.
+  const ledger = q.ledger ?? fabricEnabled();
   const { rows } = await db.query(
     `WITH due AS (
        SELECT e.escrow_id, t.agent_id, u.phone_number, s.stage, b.cents,
@@ -504,8 +592,8 @@ export async function dueReminders(db: Db, q: { stages: readonly number[]; minAm
                               WHERE e.release_due_at <= NOW() - make_interval(days => d.days)) s
          CROSS JOIN LATERAL (SELECT (sum((c.gross_commission * 100)::bigint) + a.payout_carry_cents)::bigint AS cents
                                FROM escrow_accounts c JOIN transactions ct USING (transaction_id)
-                              WHERE ct.agent_id = t.agent_id AND ${CLAIMABLE('c')} AND c.release_due_at <= NOW()) b
-        WHERE ${CLAIMABLE('e')}
+                              WHERE ct.agent_id = t.agent_id AND ${CLAIMABLE('c')} AND ${READY('c', ledger)}) b
+        WHERE ${CLAIMABLE('e')} AND ${READY('e', ledger)}
           AND e.release_due_at <= NOW() - make_interval(days => ($1::int[])[1])
           -- Against every stage still on the agent's unclaimed escrows: a key escrow leaving the claimable
           -- set (security hold, QUARANTINED) must not let the next one resend a stage. e's own stage is
@@ -514,7 +602,7 @@ export async function dueReminders(db: Db, q: { stages: readonly number[]; minAm
                 SELECT max(m.unclaimed_reminder_stage) FROM escrow_accounts m JOIN transactions mt USING (transaction_id)
                  WHERE mt.agent_id = t.agent_id AND m.escrow_status IN ('HELD', 'QUARANTINED') AND m.ufaa_return_id IS NULL))
           AND NOT EXISTS (SELECT 1 FROM escrow_accounts o JOIN transactions ot USING (transaction_id)
-                           WHERE ot.agent_id = t.agent_id AND ${CLAIMABLE('o')} AND (o.release_due_at, o.escrow_id) < (e.release_due_at, e.escrow_id))
+                           WHERE ot.agent_id = t.agent_id AND ${CLAIMABLE('o')} AND ${READY('o', ledger)} AND (o.release_due_at, o.escrow_id) < (e.release_due_at, e.escrow_id))
           AND u.disabled_at IS NULL
           AND NOT EXISTS (SELECT 1 FROM payouts p WHERE p.agent_id = t.agent_id AND p.status IN ${OPEN})
           AND b.cents / 100 >= $2

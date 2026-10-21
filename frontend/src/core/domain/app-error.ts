@@ -17,6 +17,7 @@ export const PAYOUT_REFUSALS = [
   'destination_changing',
   'disclosure_changed',
   'temporarily_unavailable',
+  'balance_under_review',
   'payout_failed',
   'payouts_disabled',
   'agent_not_provisioned',
@@ -97,6 +98,8 @@ export function payoutRefusalMessage(code: PayoutRefusal): string {
       return 'The payout notice has changed. Read it and accept it again.';
     case 'temporarily_unavailable':
       return 'Not sent, nothing deducted. Try again in a few minutes.';
+    case 'balance_under_review':
+      return 'Part of your balance is under review, so nothing was sent or deducted. Claim again to receive the rest.';
     case 'payout_failed':
       return 'M-Pesa did not accept the payout. Nothing was deducted: your balance is back.';
     case 'payouts_disabled':

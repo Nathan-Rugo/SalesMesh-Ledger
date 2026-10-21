@@ -393,7 +393,8 @@ describe('I/O matrix', () => {
 
   it('payouts off: startup does not require the B2C or SMS settings; on: B2C is required', async () => {
     const db: any = { query: jest.fn(async () => ({ rows: [{}], rowCount: 1 })) };
-    const base = { NODE_ENV: 'development', PII_HMAC_KEY: process.env.PII_HMAC_KEY, JWT_PRIVATE_KEY: process.env.JWT_PRIVATE_KEY, JWT_KEY_ID: 'test-k1', MPESA_CALLBACK_TOKEN: 'cbtok123' };
+    const base = { NODE_ENV: 'development', PII_HMAC_KEY: process.env.PII_HMAC_KEY, JWT_PRIVATE_KEY: process.env.JWT_PRIVATE_KEY, JWT_KEY_ID: 'test-k1', MPESA_CALLBACK_TOKEN: 'cbtok123',
+      LEDGER_STATE_HMAC_KEY: process.env.LEDGER_STATE_HMAC_KEY, LEDGER_CONSENT_HMAC_KEY: process.env.LEDGER_CONSENT_HMAC_KEY };
     expect(await preflight(base, db)).toEqual({ fatal: [], warnings: [] });
     expect((await preflight({ ...base, PAYOUTS_ENABLED: 'true' }, db)).fatal).toEqual([expect.stringMatching(/missing DARAJA_CONSUMER_KEY.*DARAJA_B2C_SHORTCODE/)]);
     expect((await preflight({ ...base, AFRICASTALKING_USERNAME: 'sandbox' }, db)).warnings).toEqual([expect.stringMatching(/AFRICASTALKING_\* is only partly set/)]);

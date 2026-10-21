@@ -5,11 +5,15 @@ on:
     paths:
       - 'backend/**'
       - 'infra/scripts/**'
+      - 'blockchain/**'
+      - 'Makefile'
       - '.github/workflows/ci-gateway.yml'
   pull_request:
     paths:
       - 'backend/**'
       - 'infra/scripts/**'
+      - 'blockchain/**'
+      - 'Makefile'
       - '.github/workflows/ci-gateway.yml'
 
 permissions:
@@ -61,3 +65,22 @@ jobs:
         run: npm run lint
       - name: Unit and integration tests
         run: npm test
+
+  # DLT-03 (#10): the gateway's ledger sync against the real Fabric testnet and a throwaway Postgres.
+  ledger-e2e:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24' # require(esm) under jest (--experimental-vm-modules) for fabric-gateway's @noble/curves
+          cache: npm
+          cache-dependency-path: backend/gateway/package-lock.json
+      - name: Install dependencies
+        working-directory: backend/gateway
+        run: npm ci
+      - name: Ledger sync e2e (commit, quarantine, release, authorise, settle, peer outage)
+        run: make fabric-ledger-e2e

@@ -411,6 +411,14 @@ CREATE TABLE IF NOT EXISTS payouts (
     resolved_at TIMESTAMPTZ,
     unresolved_at TIMESTAMPTZ,                        -- when it became UNRESOLVED (spec gh-11 part 3c: SLA clock)
     sla_escalated_at TIMESTAMPTZ,                     -- when its SLA breach was escalated to admins (once)
+    -- Fabric ledger (DLT-03, #10): the committed AuthorisePayout, every Authorise tx id that may have
+    -- reached the orderer (a late commit is detected by them), and the keyed consent digest sent on chain.
+    ledger_tx_id VARCHAR(64),
+    ledger_block_number BIGINT,
+    ledger_block_hash VARCHAR(64),
+    ledger_authorise_tx_ids TEXT[] NOT NULL DEFAULT '{}',
+    ledger_consent_digest VARCHAR(64),
+    ledger_consent_key_id VARCHAR(8),
     CONSTRAINT payouts_carry_arithmetic CHECK (gross_cents + carry_in_cents = amount::bigint * 100 + carry_out_cents)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS payouts_one_open ON payouts (agent_id) WHERE status IN ('SENT', 'UNKNOWN', 'UNRESOLVED');
@@ -479,7 +487,7 @@ CREATE TABLE IF NOT EXISTS escrow_accounts (
     hold_seconds INTEGER,                            -- T_hold (spec gh-23); NULL on legacy rows
     quarantine_reason VARCHAR(40)                    -- why a QUARANTINED escrow is quarantined (NULL while HELD)
         CONSTRAINT escrow_accounts_quarantine_reason_check CHECK (quarantine_reason IN (
-        'security_hold', 'fail_safe', 'model_decision', 'trust_below_threshold', 'trust_input_invalid')),
+        'security_hold', 'fail_safe', 'model_decision', 'trust_below_threshold', 'trust_input_invalid', 'auditor_hold')),
     -- Unclaimed reminders (spec gh-11 part 3a): highest stage sent for the cycle this oldest escrow keys.
     unclaimed_reminder_stage SMALLINT NOT NULL DEFAULT 0
         CONSTRAINT escrow_accounts_unclaimed_reminder_stage CHECK (unclaimed_reminder_stage BETWEEN 0 AND 3),
@@ -489,6 +497,13 @@ CREATE TABLE IF NOT EXISTS escrow_accounts (
     sla_escalated_at TIMESTAMPTZ,
     -- Admin risk queue (spec gh-14): an admin chose "Keep held" in this spell (cleared with the spell).
     reviewed_at TIMESTAMPTZ,
+    -- Fabric ledger (DLT-03, #10): the committed CommitTransaction, and the keyed state hash sent on chain.
+    -- quarantine_reason 'auditor_hold': the auditor holds it on the ledger (security_hold, no admin override).
+    ledger_tx_id VARCHAR(64),
+    ledger_block_number BIGINT,
+    ledger_block_hash VARCHAR(64),
+    ledger_state_hash VARCHAR(64),
+    ledger_state_key_id VARCHAR(8),
     CONSTRAINT escrow_accounts_claimed_payout CHECK (escrow_status <> 'CLAIMED' OR payout_id IS NOT NULL),
     CONSTRAINT escrow_accounts_remitted_return CHECK (escrow_status <> 'REMITTED' OR ufaa_return_id IS NOT NULL)
 );
@@ -542,6 +557,40 @@ CREATE TABLE IF NOT EXISTS reconciliation_exceptions (
     CONSTRAINT reconciliation_exceptions_dedup UNIQUE (kind, mpesa_receipt_id, related_receipt_id)
 );
 
+CREATE INDEX IF NOT EXISTS escrow_accounts_auditor_hold_idx ON escrow_accounts (escrow_id) WHERE quarantine_reason = 'auditor_hold';
+
+-- LEDGER_OUTBOX (DLT-03, #10): every escrow / payout write the gateway owes the commission chaincode,
+-- written in the same transaction as the state change. `request` is the exact JSON sent (snapshotted at
+-- enqueue, never rebuilt). Delivery is ordered per key (e:<escrowId>, p:<payoutId>): a row is sent only
+-- when no earlier PENDING / DEAD row shares a key. absent_tx_ids: a SETTLE queued by a claim rollback;
+-- NOT_FOUND counts as done only when none of these AuthorisePayout tx ids committed.
+CREATE TABLE IF NOT EXISTS ledger_outbox (
+    outbox_id BIGSERIAL PRIMARY KEY,
+    op VARCHAR(12) NOT NULL CHECK (op IN ('COMMIT', 'QUARANTINE', 'RELEASE', 'SETTLE')),
+    keys TEXT[] NOT NULL CHECK (cardinality(keys) > 0),
+    request TEXT NOT NULL,
+    request_id UUID,
+    escrow_id UUID REFERENCES escrow_accounts(escrow_id) ON DELETE RESTRICT,
+    payout_id UUID REFERENCES payouts(payout_id) ON DELETE RESTRICT,
+    absent_tx_ids TEXT[],
+    status VARCHAR(12) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'DELIVERED', 'DEAD', 'SUPERSEDED')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    claimed_at TIMESTAMPTZ,
+    claim_token UUID,
+    last_error TEXT,
+    tx_id VARCHAR(64),
+    block_number BIGINT,
+    block_hash VARCHAR(64),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    delivered_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS ledger_outbox_open_idx ON ledger_outbox (status, outbox_id) WHERE status IN ('PENDING', 'DEAD');
+CREATE INDEX IF NOT EXISTS ledger_outbox_open_keys_idx ON ledger_outbox USING GIN (keys) WHERE status IN ('PENDING', 'DEAD');
+CREATE INDEX IF NOT EXISTS ledger_outbox_escrow_idx ON ledger_outbox (escrow_id) WHERE escrow_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ledger_outbox_hash_idx ON ledger_outbox (block_number) WHERE block_number IS NOT NULL AND block_hash IS NULL;
+CREATE INDEX IF NOT EXISTS payouts_ledger_hash_idx ON payouts (ledger_block_number) WHERE ledger_block_number IS NOT NULL AND ledger_block_hash IS NULL;
+
 -- Table 9: LEDGER_ENTRIES
 CREATE TABLE IF NOT EXISTS ledger_entries (
     ledger_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -575,5 +624,5 @@ CREATE TABLE IF NOT EXISTS tax_deductions (
 INSERT INTO schema_migrations (version) VALUES ('001_settlement_pipeline'), ('002_auth_stk_initiation'), ('003_reconciliation'),
                                                ('004_trust_scores'), ('005_payout_destinations'), ('006_payout_claims'),
                                                ('007_unclaimed_reminders'), ('008_ufaa_remittance'),
-                                               ('009_frozen_sla_escalation'), ('010_admin_oversight')
+                                               ('009_frozen_sla_escalation'), ('010_admin_oversight'), ('011_ledger_sync')
     ON CONFLICT (version) DO NOTHING;

@@ -36,13 +36,13 @@ interface Keyring {
 }
 
 const MIN_KEY_BYTES = 32;
-const KEY_ID_RE = /^k[0-9]{1,6}$/;
+export const KEY_ID_RE = /^k[0-9]{1,6}$/;
 /** Shape of every hash this module produces. */
 export const KEYED_HASH_RE = /^k[0-9]{1,6}:[0-9a-f]{64}$/;
 
 export class PiiKeyError extends Error {}
 
-function decodeKey(raw: string, name: string): Buffer {
+export function decodeKey(raw: string, name: string): Buffer {
   let key: Buffer;
   if (raw.startsWith('base64:')) key = Buffer.from(raw.slice(7), 'base64');
   else if (raw.startsWith('hex:')) {
