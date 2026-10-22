@@ -34,6 +34,11 @@ export const OVERRIDE_REFUSALS = ['already_decided', 'security_hold', 'not_unres
 export type OverrideRefusal = (typeof OVERRIDE_REFUSALS)[number];
 export const isOverrideRefusal = (v: unknown): v is OverrideRefusal => typeof v === 'string' && (OVERRIDE_REFUSALS as readonly string[]).includes(v);
 
+/** Gateway refusals of an STK Push request (gh-5 / gh-60), read from the response body. */
+export const STK_REFUSALS = ['possible_duplicate', 'idempotency_in_progress', 'stk_rejected', 'stk_disabled', 'agent_not_provisioned'] as const;
+export type StkRefusal = (typeof STK_REFUSALS)[number];
+export const isStkRefusal = (v: unknown): v is StkRefusal => typeof v === 'string' && (STK_REFUSALS as readonly string[]).includes(v);
+
 export type AppError =
   | { readonly kind: 'invalid_credentials' }
   | { readonly kind: 'throttled'; readonly retryAfterS: number | null }
@@ -47,6 +52,9 @@ export type AppError =
   | { readonly kind: 'invalid_request' }
   | { readonly kind: 'payout_refused'; readonly code: PayoutRefusal }
   | { readonly kind: 'override_refused'; readonly code: OverrideRefusal }
+  | { readonly kind: 'stk_refused'; readonly code: StkRefusal }
+  /** Payment request form input the gateway would refuse (checked before any request). */
+  | { readonly kind: 'invalid_payment_input'; readonly phone: boolean; readonly amount: boolean }
   | { readonly kind: 'unexpected'; readonly status?: number };
 
 /** Stable, user-facing copy for an error (no enumeration hints). */
@@ -76,6 +84,10 @@ export function errorMessage(e: AppError): string {
       return payoutRefusalMessage(e.code);
     case 'override_refused':
       return overrideRefusalMessage(e.code);
+    case 'stk_refused':
+      return stkRefusalMessage(e.code);
+    case 'invalid_payment_input':
+      return 'Check the phone number and amount.';
     case 'unexpected':
       return 'Something went wrong. Try again.';
   }
@@ -114,6 +126,22 @@ export function payoutRefusalMessage(code: PayoutRefusal): string {
       return 'Your registered number can’t receive M-Pesa payouts. Ask your merchant to update it.';
     case 'verification_failed':
       return 'M-Pesa refused the verification payment. Check your line is active, then try again.';
+  }
+}
+
+/** What a refused STK Push request means, and the next step. */
+export function stkRefusalMessage(code: StkRefusal): string {
+  switch (code) {
+    case 'possible_duplicate':
+      return 'You asked this customer for the same amount less than a minute ago.';
+    case 'idempotency_in_progress':
+      return 'The first request is still being sent to M-Pesa. Retry in a few seconds: it will not prompt twice.';
+    case 'stk_rejected':
+      return 'M-Pesa did not accept the request. No prompt was sent; try again.';
+    case 'stk_disabled':
+      return 'Payment requests are switched off for now. Take the payment at the till instead.';
+    case 'agent_not_provisioned':
+      return 'Your agent account is not set up yet. Ask your merchant.';
   }
 }
 

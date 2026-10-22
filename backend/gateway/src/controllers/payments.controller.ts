@@ -208,6 +208,10 @@ export class PaymentsController {
       checkout_request_id: row.checkoutRequestId,
       result_code: row.resultCode,
       customer_message: row.customerMessage,
+      // Settlement consumed a receipt: the money arrived, whatever the STK status says. No receipt
+      // masking exists in the gateway and it is the agent's own sale, so the receipt goes in full.
+      paid: row.consumedReceipt !== null,
+      receipt: row.consumedReceipt,
     });
   }
 

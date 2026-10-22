@@ -324,6 +324,18 @@ describe('GET /api/v1/payments/stk/:id', () => {
     });
   });
 
+  it('paid / receipt: false and null until settlement consumes a receipt, then true with the receipt', async () => {
+    const created = await initiate(OK_BODY, 'get-paid');
+    expect(await get(created.body.stk_request_id)).toMatchObject({ status: 200, body: { status: 'ACCEPTED', paid: false, receipt: null } });
+    memStk.rows[0].consumedReceipt = 'UAB1C2D3E4';
+    expect(await get(created.body.stk_request_id)).toMatchObject({ status: 200, body: { status: 'ACCEPTED', paid: true, receipt: 'UAB1C2D3E4' } });
+    const other = crypto.randomUUID();
+    mockAgents.set(other, { agentId: crypto.randomUUID(), agentCode: 'AG778', userDisabled: false });
+    const leaked = await get(created.body.stk_request_id, await token('SALES_AGENT', other));
+    expect(leaked).toMatchObject({ status: 404, body: { error: 'not_found' } });
+    expect(leaked.body).not.toHaveProperty('receipt');
+  });
+
   it("another agent's request, an unknown id or a malformed id → 404; MERCHANT_ADMIN → 403; no token → 401", async () => {
     const created = await initiate(OK_BODY, 'get-2');
     const other = crypto.randomUUID();

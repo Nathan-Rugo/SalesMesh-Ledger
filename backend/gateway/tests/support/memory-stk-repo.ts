@@ -36,6 +36,7 @@ const view = (r: MemStk): StkRow => ({
   resultCode: r.resultCode,
   error: r.error,
   customerMessage: r.customerMessage,
+  consumedReceipt: r.consumedReceipt,
   pendingAgeMs: r.status === 'PENDING' ? Date.now() - r.claimedAt : null,
 });
 

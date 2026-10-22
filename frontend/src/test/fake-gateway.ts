@@ -147,3 +147,15 @@ export const queueBody = (o: { escrows?: unknown[]; payouts?: unknown[] } & Reco
     payouts,
   };
 };
+
+/** An STK request body as POST /api/v1/payments/stk and GET .../stk/:id send it (payments.controller.ts). */
+export const stkView = (o: Record<string, unknown> = {}) => ({
+  stk_request_id: 's-1',
+  status: 'ACCEPTED',
+  checkout_request_id: 'ws_CO_1',
+  result_code: null,
+  customer_message: 'Success. Request accepted for processing',
+  paid: false,
+  receipt: null,
+  ...o,
+});

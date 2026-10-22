@@ -21,6 +21,8 @@ export interface RequestOptions {
   readonly signal?: AbortSignal;
   /** Non-2xx statuses returned as data (raw body) for the caller to interpret, e.g. payout 409/502/503 codes. */
   readonly accept?: readonly number[];
+  /** Extra request headers, e.g. `Idempotency-Key` (kept on the post-refresh retry). */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 export type HttpErrorListener = (error: AppError, path: string) => void;
@@ -88,7 +90,7 @@ export class HttpClient {
     opts: RequestOptions,
     token: string | null
   ): Promise<Result<{ status: number; headers: Headers; body: unknown }, AppError>> {
-    const headers: Record<string, string> = { Accept: 'application/json' };
+    const headers: Record<string, string> = { Accept: 'application/json', ...opts.headers };
     if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
     if (token) headers.Authorization = `Bearer ${token}`;
     let response: Response;

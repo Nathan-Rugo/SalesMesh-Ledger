@@ -72,12 +72,14 @@ export interface StkRow {
   resultCode: string | null;
   error: string | null;
   customerMessage: string | null;
+  /** The M-Pesa receipt this request was paid with (set by settlement), or null while unpaid. */
+  consumedReceipt: string | null;
   /** How long the row has been PENDING (ms), or null when not PENDING. */
   pendingAgeMs: number | null;
 }
 
 const COLUMNS = `stk_request_id, agent_id, status, checkout_request_id, amount::text AS amount, request_fingerprint,
-  response_code, result_code, error, customer_message,
+  response_code, result_code, error, customer_message, consumed_receipt,
   CASE WHEN status = 'PENDING' THEN EXTRACT(EPOCH FROM NOW() - COALESCE(claimed_at, created_at)) * 1000 END AS pending_age_ms`;
 
 function toRow(r: QueryResultRow): StkRow {
@@ -92,6 +94,7 @@ function toRow(r: QueryResultRow): StkRow {
     resultCode: r.result_code,
     error: r.error,
     customerMessage: r.customer_message,
+    consumedReceipt: r.consumed_receipt ?? null,
     pendingAgeMs: r.pending_age_ms === null || r.pending_age_ms === undefined ? null : Number(r.pending_age_ms),
   };
 }
