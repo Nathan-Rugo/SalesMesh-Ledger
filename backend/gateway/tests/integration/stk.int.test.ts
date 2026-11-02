@@ -155,8 +155,13 @@ describeDb('STK initiation → callback → settlement (real Postgres)', () => {
     expect(row.phone_mask_hash).toBe(msisdnMaskHash('254712345678'));
     expect(JSON.stringify(row)).not.toContain('712345678');
 
+    // gh-60: GET status reads consumed_receipt through the real SELECT.
+    const status = () => srv.request('GET', `/api/v1/payments/stk/${res.body.stk_request_id}`, { headers: { Authorization: `Bearer ${a.token}` } });
+    expect((await status()).body).toMatchObject({ status: 'ACCEPTED', paid: false, receipt: null });
+
     await stkCallback('E2EA000001', 'ws_CO_E2E_1', 1500, new Date(Date.now() + 2000));
     await drain(worker());
+    expect((await status()).body).toMatchObject({ paid: true, receipt: 'E2EA000001' });
     const { rows: [tx] } = await db.pool.query(`SELECT agent_id, source_channel FROM transactions WHERE mpesa_receipt_id = 'E2EA000001'`);
     expect(tx).toEqual({ agent_id: a.agentId, source_channel: 'DARAJA_STK' });
     const { rows: [after] } = await db.pool.query(`SELECT consumed_receipt, fallback_bound_at FROM stk_requests WHERE stk_request_id = $1`, [row.stk_request_id]);

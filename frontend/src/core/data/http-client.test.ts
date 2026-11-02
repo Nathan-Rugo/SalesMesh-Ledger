@@ -128,6 +128,19 @@ describe('HttpClient auth retry', () => {
   });
 });
 
+describe('HttpClient per-request headers', () => {
+  it('sends extra headers on the first try and on the post-refresh retry', async () => {
+    const { c, gw } = await signedIn({
+      [REFRESH]: () => json(200, sessionBody({ tok: token('new') })),
+      '/api/v1/k': (i) => (authHeader(i) === `Bearer ${token('new')}` ? json(200, {}) : json(401, { error: 'unauthorized' })),
+    });
+    const r = await c.http.request('/api/v1/k', { method: 'POST', body: {}, headers: { 'Idempotency-Key': 'stk-1' } });
+    expect(r.ok).toBe(true);
+    const sent = gw.calls.filter((x) => x.url === '/api/v1/k').map((x) => (x.init.headers as Record<string, string>)['Idempotency-Key']);
+    expect(sent).toEqual(['stk-1', 'stk-1']);
+  });
+});
+
 describe('toAppError', () => {
   it.each([
     [401, { error: 'invalid_credentials' }, null, { kind: 'invalid_credentials' }],
