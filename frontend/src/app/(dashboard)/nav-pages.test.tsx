@@ -12,11 +12,13 @@ import AdminPage from './admin/page';
 import AdminQueuePage from './admin/queue/page';
 import AgentAccountPage from './agent/account/page';
 import AgentPage from './agent/page';
+import AgentCollectPage from './agent/collect/page';
 import AgentPayoutsPage from './agent/payouts/page';
 import { DashboardShell } from './dashboard-shell';
 
 const PAGES: Record<string, { Page: ComponentType; heading: string }> = {
   '/agent': { Page: AgentPage, heading: 'Your ledger' },
+  '/agent/collect': { Page: AgentCollectPage, heading: 'Request payment' },
   '/agent/payouts': { Page: AgentPayoutsPage, heading: 'Payouts' },
   '/agent/account': { Page: AgentAccountPage, heading: 'Account' },
   '/admin': { Page: AdminPage, heading: 'Oversight' },
