@@ -72,6 +72,8 @@ MPESA_CALLBACK_TOKEN=... DATABASE_URL=postgres://... \
 - 0 ACKed receipts missing from `mpesa_callbacks` (when `DATABASE_URL` is set)
 - an achieved rate of at least 95% of the target
 
+With `DATABASE_URL` set, the script seeds the `--agent-code` agent first (idempotently), so rows settle on the known-agent path. It then checks every *sent* receipt: "lost" means ACKed with no row, and rows for non-ACKed sends are reported separately. Without `DATABASE_URL` the agent isn't seeded and the worker parks rows UNRESOLVED after the ACK. The measured hot path is the same either way, and the JSON's `config.agent_path` records which path ran.
+
 **Stuffing e2e.** This is a TypeScript port of `ml-engine/engine/fraud_injector.py`:
 
 - θ = 5000; the anchor A (log-normal, median 1500, σ 0.9, as in `base_traffic.py`) is drawn in (θ, 6.79θ].
@@ -103,3 +105,4 @@ Harness defects (test code, not the gateway):
 | Replay storm (`duplicates.int.test.ts`) | 250 simultaneous connects overflowed the Windows listen backlog, so requests failed with `ECONNREFUSED` before reaching the gateway | At most 25 requests in flight. The 5 copies of each receipt are adjacent, so they still race each other |
 | Fault proxy under `latency()` | `close` destroyed the peer while delayed chunks were pending, so latency turned into truncated replies | The destroy is delayed by the same `delayMs` as `end` |
 | Flaky Postgres (`dropEvery`) | A socket reset by the proxy surfaced as transport status 0 and failed the test, although the gateway behaved | 0 is treated like a 503: Daraja retries both |
+| Chaos suite, first test (`chaos.int.test.ts`) | On a loaded machine, cold hot-pool connects (SCRAM auth through the proxy) took longer than the 150 ms deadline, so deliveries got 503 before any fault was injected | `beforeAll` warms the hot pool, retrying until 10 idle connections exist |
