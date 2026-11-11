@@ -93,35 +93,38 @@ export async function seedAgent(pool: Pool, agentCode: string | null, phone?: st
   return a.agent_id;
 }
 
+type MlDecision = { decision: 'CLEAR' | 'QUARANTINE' | 'REVIEW' } & Record<string, unknown>;
+
+/** A contract-valid ml-engine /evaluate response for request `req`; `out` overrides any field. */
+export function mlResponse(req: any, out: MlDecision) {
+  return {
+    transaction_id: req.transaction_id,
+    isolation_score: 0.123456789,
+    xgb_probability: 0.0456789,
+    model_version: 'v1.0.0',
+    model_sha256: 'b'.repeat(64),
+    triggered_layer: out.decision === 'CLEAR' ? 1 : 2,
+    layer2_adjudicated: out.decision !== 'CLEAR',
+    reason: 'stub',
+    latency_ms: 1,
+    evaluated_at: new Date().toISOString(),
+    feature_vector: { velocity_v_i: 0.5, split_ratio_r_s: 0.1, entropy_gaps: 1.2, agent_zscore: 0.3, amount_to_median_ratio: 1, recipient_reuse_count: 0 },
+    ...out,
+  };
+}
+
 /**
  * ml-engine stand-in for global.fetch: answers each request for its own transaction_id. The
  * decider may override any response field (e.g. layer2_adjudicated, xgb_probability).
  */
-export function mlStub(decide: (req: any) => ({ decision: 'CLEAR' | 'QUARANTINE' | 'REVIEW' } & Record<string, unknown>) | 'down') {
+export function mlStub(decide: (req: any) => MlDecision | 'down') {
   const calls: any[] = [];
   const fn = jest.fn(async (_url: string, init: { body: string }) => {
     const req = JSON.parse(init.body);
     calls.push(req);
     const out = decide(req);
     if (out === 'down') throw new Error('connect ECONNREFUSED');
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        transaction_id: req.transaction_id,
-        isolation_score: 0.123456789,
-        xgb_probability: 0.0456789,
-        model_version: 'v1.0.0',
-        model_sha256: 'b'.repeat(64),
-        triggered_layer: out.decision === 'CLEAR' ? 1 : 2,
-        layer2_adjudicated: out.decision !== 'CLEAR',
-        reason: 'stub',
-        latency_ms: 1,
-        evaluated_at: new Date().toISOString(),
-        feature_vector: { velocity_v_i: 0.5, split_ratio_r_s: 0.1, entropy_gaps: 1.2, agent_zscore: 0.3, amount_to_median_ratio: 1, recipient_reuse_count: 0 },
-        ...out,
-      }),
-    };
+    return { ok: true, status: 200, json: async () => mlResponse(req, out) };
   });
   (global as any).fetch = fn;
   return { fn, calls };
