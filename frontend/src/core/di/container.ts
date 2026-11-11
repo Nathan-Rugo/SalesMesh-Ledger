@@ -14,6 +14,9 @@ import { GetPayoutLinesUseCase, VerifyPayoutLineUseCase } from '@/features/agent
 import { GatewayOversightDataSource } from '@/features/admin-oversight/data/datasources/gateway-oversight-datasource';
 import { GatewayOversightRepository } from '@/features/admin-oversight/data/repositories/gateway-oversight-repository';
 import { GetQueueUseCase, OverrideUseCase } from '@/features/admin-oversight/domain/usecases/oversight-usecases';
+import { GatewayAgentsDataSource } from '@/features/admin-agents/data/datasources/gateway-agents-datasource';
+import { GatewayAgentsRepository } from '@/features/admin-agents/data/repositories/gateway-agents-repository';
+import { ListAgentsUseCase } from '@/features/admin-agents/domain/usecases/list-agents';
 import { GatewayCollectDataSource } from '@/features/collect-payment/data/datasources/gateway-collect-datasource';
 import { GatewayCollectRepository } from '@/features/collect-payment/data/repositories/gateway-collect-repository';
 import { GetPaymentStatusUseCase, RequestPaymentUseCase } from '@/features/collect-payment/domain/usecases/collect-usecases';
@@ -32,6 +35,7 @@ export interface Container {
   readonly verifyPayoutLine: VerifyPayoutLineUseCase;
   readonly getQueue: GetQueueUseCase;
   readonly override: OverrideUseCase;
+  readonly listAgents: ListAgentsUseCase;
   readonly requestPayment: RequestPaymentUseCase;
   readonly getPaymentStatus: GetPaymentStatusUseCase;
 }
@@ -42,6 +46,7 @@ export function createContainer(fetchImpl?: typeof fetch): Container {
   http.setTokenSource(authRepository);
   const ledger = new GatewayLedgerRepository(new GatewayLedgerDataSource(http));
   const oversight = new GatewayOversightRepository(new GatewayOversightDataSource(http));
+  const agents = new GatewayAgentsRepository(new GatewayAgentsDataSource(http));
   const collect = new GatewayCollectRepository(new GatewayCollectDataSource(http));
   return {
     http,
@@ -56,6 +61,7 @@ export function createContainer(fetchImpl?: typeof fetch): Container {
     verifyPayoutLine: new VerifyPayoutLineUseCase(ledger),
     getQueue: new GetQueueUseCase(oversight),
     override: new OverrideUseCase(oversight),
+    listAgents: new ListAgentsUseCase(agents),
     requestPayment: new RequestPaymentUseCase(collect),
     getPaymentStatus: new GetPaymentStatusUseCase(collect),
   };

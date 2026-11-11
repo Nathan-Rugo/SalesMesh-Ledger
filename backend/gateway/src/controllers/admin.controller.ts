@@ -3,6 +3,7 @@
  * @description /api/v1/admin (spec gh-11 part 3c, gh-14) — HTTP mapping only. Phones are always masked.
  *
  *   GET  /frozen-payouts             → 200 {sla, totals, overdue, total_available, escrows[], payouts[]} (overdue first, then oldest)
+ *   GET  /agents                     -> 200 {agents:[{agent_code, full_name, msisdn (masked), activated, disabled, payout: {status, msisdn (masked)}|null}]}
  *   POST /escrows/:id/release {pin, note}               → 200 {escrow} | 409 already_decided | security_hold | 404
  *   POST /escrows/:id/keep    {pin, note}               → 200 {escrow} | 409 already_decided | security_hold | 404
  *   POST /payouts/:id/resolve {pin, note, outcome: paid|failed, receipt?} → 200 {payout} | 409 not_unresolved | 404
@@ -11,6 +12,9 @@
  */
 
 import type { Request, Response } from 'express';
+import pool from '../config/db';
+import { listAgentDirectory } from '../repositories/agent.repository';
+import type { Db } from '../repositories/db.types';
 import { RECEIPT_RE } from '../domain/callback';
 import { maskMsisdn } from '../domain/payout_destination';
 import type { EscrowOverride } from '../repositories/frozen.repository';
@@ -29,7 +33,24 @@ export function noteOf(req: Request): string | null {
 }
 
 export class AdminController {
-  constructor(private readonly frozen: FrozenPayoutService = frozenPayoutService) {}
+  constructor(
+    private readonly frozen: FrozenPayoutService = frozenPayoutService,
+    private readonly db: Db = pool
+  ) {}
+
+  async agents(_req: Request, res: Response): Promise<void> {
+    const rows = await listAgentDirectory(this.db);
+    res.status(200).json({
+      agents: rows.map((a) => ({
+        agent_code: a.agentCode,
+        full_name: a.fullName,
+        msisdn: maskMsisdn(a.msisdn),
+        activated: a.activated,
+        disabled: a.disabled,
+        payout: a.payout && { status: a.payout.status, msisdn: maskMsisdn(a.payout.msisdn) },
+      })),
+    });
+  }
 
   async frozenPayouts(_req: Request, res: Response): Promise<void> {
     const r = await this.frozen.list();

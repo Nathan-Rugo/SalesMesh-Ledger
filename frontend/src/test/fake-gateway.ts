@@ -159,3 +159,14 @@ export const stkView = (o: Record<string, unknown> = {}) => ({
   receipt: null,
   ...o,
 });
+
+/** An agent row of GET /api/v1/admin/agents (admin.controller.ts). */
+export const agentView = (o: Record<string, unknown> = {}) => ({
+  agent_code: 'AG042',
+  full_name: 'Wanjiru Kamau',
+  msisdn: '2547******78',
+  activated: true,
+  disabled: false,
+  payout: { status: 'ACTIVE', msisdn: '2547******78' },
+  ...o,
+});
