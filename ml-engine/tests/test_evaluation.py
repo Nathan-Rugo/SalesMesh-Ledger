@@ -28,7 +28,7 @@ from engine.split import agent_components, chronological_agent_grouped_split
 from engine.train import main as train_main
 
 DATASET = os.path.join(ROOT, "salesmesh_fraud_dataset.csv")
-MODEL = os.path.join(ROOT, "models", "risk_cascade_v1.0.0.joblib")
+MODEL = os.path.join(ROOT, "models", "risk_cascade_v1.1.0.joblib")
 
 
 def _toy(n_comp=4, rows_per_comp=5):

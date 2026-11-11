@@ -11,7 +11,7 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
       - ENVIRONMENT=production
-      - MODEL_PATH=/app/models/risk_cascade_v1.0.0.joblib
+      - MODEL_PATH=/app/models/risk_cascade_v1.1.0.joblib
       # Pin the artifact digest from outside models/ (see models/*.sha256); empty = sidecar check only.
       - MODEL_SHA256=${MODEL_SHA256:-}
       - ENABLE_SHAP=true

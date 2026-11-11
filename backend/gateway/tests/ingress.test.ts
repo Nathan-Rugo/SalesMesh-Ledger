@@ -472,7 +472,7 @@ describe('Suite 3: Circuit Breaker — NFR-08 Fail-Safe', () => {
     expect(r1.decision).toBe('QUARANTINE');
     expect(r2.decision).toBe('QUARANTINE');
     expect(r3.decision).toBe('QUARANTINE');
-    expect(r3.model_version).toBe('v1.0.0-failsafe');
+    expect(r3.model_version).toBe('v1.1.0-failsafe');
     expect(mockFetch).toHaveBeenCalledTimes(3);
   });
 

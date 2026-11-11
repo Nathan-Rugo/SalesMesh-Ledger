@@ -5,7 +5,7 @@ Top-level entry point to train and evaluate the SalesMesh Two-Layer ML Risk Engi
 
 Usage:
     python train.py --dataset test_dataset_100.csv
-    python train.py --dataset salesmesh_fraud_dataset.csv --model-version v1.0.0
+    python train.py --dataset salesmesh_fraud_dataset.csv --model-version v1.1.0
 """
 
 import os

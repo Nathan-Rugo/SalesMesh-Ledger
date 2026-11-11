@@ -6,7 +6,7 @@ Combines an unsupervised **Isolation Forest** pre-filter (<30ms) feeding a super
 
 **Status:** engine rebuilt with statistically valid evaluation, service hardened, and packaging pinned.
 - The automated test suite passes in a venv built from the compiled pins (`python -m pytest tests -q`).
-- Trained artifact `models/risk_cascade_v1.0.0.joblib` with its `.sha256` sidecar, both committed to git.
+- Trained artifact `models/risk_cascade_v1.1.0.joblib` with its `.sha256` sidecar, both committed to git.
 - FastAPI microservice exposing `POST /evaluate` (features mode or raw transaction + history), `GET /health`, `GET /model/info`.
 - Non-root Docker image, docker-compose service, and a CI job that runs pytest and builds the image.
 - TypeScript gateway client in `integration/`: **pending (deferred)**. The existing file predates the hardened API,
@@ -50,7 +50,8 @@ Combines an unsupervised **Isolation Forest** pre-filter (<30ms) feeding a super
 ```
 ml-engine/
 ├── engine/                       # Core ML Package
-│   ├── base_traffic.py           # Synthetic backbone & PaySim loader
+│   ├── base_traffic.py           # PaySim-calibrated synthetic backbone & PaySim replay loader
+│   ├── paysim_profile.py         # Streamed PaySim profiler (hour weights, busy-day volume CV)
 │   ├── fraud_injector.py         # Commission stuffing & circular chaining injectors
 │   ├── features.py               # Feature engineering (V_i, R_s, entropy, z-score, reuse)
 │   ├── split.py                  # Chronological, agent-component-grouped partitioning (Dal Pozzolo et al., 2018)
@@ -66,16 +67,20 @@ ml-engine/
 │   └── config.py                 # Environment and runtime settings
 ├── integration/                  # Gateway client - PENDING (deferred rebuild)
 │   └── risk_client.ts            # Pre-hardening draft; not yet aligned with the current /evaluate contract
+├── data/
+│   └── paysim_profile.json       # Fitted PaySim profile (committed; the PaySim CSV is not)
 ├── models/
-│   ├── risk_cascade_v1.0.0.joblib # Serialized model artifact (committed)
-│   └── risk_cascade_v1.0.0.joblib.sha256 # Integrity sidecar; load is refused without it
+│   ├── risk_cascade_v1.1.0.joblib # Serialized model artifact (committed)
+│   └── risk_cascade_v1.1.0.joblib.sha256 # Integrity sidecar; load is refused without it
 ├── reports/
 │   ├── evaluation_report.md      # Full Markdown evaluation report & baseline lift
-│   └── metrics.json              # Machine-readable metrics & ablation data
+│   ├── metrics.json              # Machine-readable metrics & ablation data
+│   └── paysim_calibration.md     # PaySim profile fit and v1.0.0 vs v1.1.0 comparison
 ├── tests/                        # pytest suite
 │   ├── test_pipeline.py          # Traffic, injectors, feature maths and batch/online parity
 │   ├── test_training_pipeline.py # Split, compiled forest, cascade, calibration, artifact integrity
 │   ├── test_evaluation.py        # Bootstrap CIs, event recall, train CLI, acceptance checks
+│   ├── test_paysim_profile.py    # PaySim profiler, calibrated hour shares, determinism, anchor supply
 │   └── test_service.py           # API contract, raw-mode parity, fail-safe error matrix, settings
 ├── Dockerfile                    # Multi-stage, python:3.11.9-slim-bookworm, non-root `app` user, urllib HEALTHCHECK
 ├── docker-compose.yml            # Single-service compose (passes MODEL_SHA256)
@@ -127,7 +132,7 @@ Bumping scikit-learn or xgboost means retraining the artifact under the new vers
 cd ml-engine
 docker build -t salesmesh-ml-engine .
 # Pin the artifact digest from outside models/ so a swapped artifact+sidecar pair is also refused:
-MODEL_SHA256=$(cut -d' ' -f1 models/risk_cascade_v1.0.0.joblib.sha256) docker compose up -d
+MODEL_SHA256=$(cut -d' ' -f1 models/risk_cascade_v1.1.0.joblib.sha256) docker compose up -d
 curl -f http://localhost:8000/health
 ```
 
@@ -145,7 +150,7 @@ pydantic-settings reads these from environment variables (`service/config.py`):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MODEL_PATH` | `models/risk_cascade_v1.0.0.joblib` | Artifact path. The `.sha256` sidecar next to it is mandatory. |
+| `MODEL_PATH` | `models/risk_cascade_v1.1.0.joblib` | Artifact path. The `.sha256` sidecar next to it is mandatory. |
 | `MODEL_SHA256` | unset | Pinned artifact digest: exactly 64 hex characters, with no `sha256:` prefix or filename. A malformed value fails at startup. On a mismatch the model is not loaded and the service stays at 503. A warning is logged when `ENVIRONMENT=production` and this is unset. |
 | `HOST` / `PORT` | `localhost` / `8000` | Bind address for `run_server.py`. The image sets `HOST=0.0.0.0`. |
 | `ENVIRONMENT` | `development` | Label only. |
@@ -244,8 +249,8 @@ equals `build_feature_matrix` on the same rows to within 1e-9, so the gateway ne
   "transaction_id": "TXN_20261001_882910",
   "isolation_score": 0.6582,
   "xgb_probability": 0.9796,
-  "model_version": "v1.0.0",
-  "model_sha256": "a1c88c6a7e02fedbea4c8758f07ec56894fad246afe07c9c39f8068243fd5abf",
+  "model_version": "v1.1.0",
+  "model_sha256": "a845a740864619621edf10e4047490802a7e8b676393a044b92abd3c17bdce5e",
   "decision": "QUARANTINE",
   "triggered_layer": 2,
   "layer2_adjudicated": true,
@@ -294,63 +299,87 @@ It returns 503 with the NFR-08 body when the model is not loaded.
 
 ---
 
-## Measured Evaluation (rebuild of 2026-10-08)
+## Measured Evaluation (v1.1.0, PaySim-calibrated backbone, 2026-11-11)
 
-Regenerated with `python generate_dataset.py --output salesmesh_fraud_dataset.csv --n-agents 300 --n-days 45`
-and `python train.py --dataset salesmesh_fraud_dataset.csv --model-version v1.0.0 --stability-repeats 5`.
-Full detail: `reports/evaluation_report.md` and `reports/metrics.json`.
+Regenerated with `python generate_dataset.py --seed 42` (300 agents, 45 days; the backbone reads
+`data/paysim_profile.json`) and `python train.py --dataset salesmesh_fraud_dataset.csv --model-version v1.1.0 --seed 42
+--n-bootstrap 1000 --stability-repeats 5`, both in the pinned `.venv`.
+Full detail: `reports/evaluation_report.md` and `reports/metrics.json`. The v1.0.0 → v1.1.0 comparison is in
+`reports/paysim_calibration.md`.
 
-**Data and split.** 85,428 rows; 900 injected fraud events (600 commission-stuffing that replace an anchor deposit,
-300 circular-chaining over 40 fixed colluding pairs); 5,141 fraud rows. Split seed 42: test = 120 unseen agents
-(40%, colluding pairs kept together) in the last 30% of time; dev agents give train (first 55%) and validation
-(55–70%). Fraud events: train 313, validation 79, test 120. Validation drops the 5 events (19 rows) that straddle the
-train/validation cutoff and so also have rows in train.
+**Backbone.** Base traffic is synthetic, with two parts fitted to PaySim1 (Lopez-Rojas et al., 2016) PAYMENT + CASH_IN rows:
+- **Hour of day:** each timestamp takes an hour drawn from PaySim's 24 pooled hour weights, plus a uniform offset
+  within that hour. The peak is 17:00–19:59; night (00:00–06:59) carries 1.1% of the weight and no hour is empty.
+  - PaySim step *s* is taken as hour (s−1), so step 1 = 00:00. This is an assumption, supported by the 07:00 → 08:00
+    jump in the weights (0.46% → 4.56%), which matches a business day opening. A phase shift is a known limitation.
+- **Day-to-day volume:** each day has a shared multiplier g ~ Gamma(mean 1, CV 0.113), the CV of PaySim's 14 busy days
+  (bootstrap 95% interval [0.041, 0.162], so this part is fitted only loosely).
+  Each agent-day count is Poisson(6·g).
 
-**Method.** Thresholds fixed at s 0.45 / 0.72 and p 0.50 / 0.85 (never tuned on test). Brackets are 95%
-cluster-bootstrap CIs: 1,000 resamples of the 106 agent components in the test partition. PR-AUC is average
-precision. The cascade PR-AUC uses the operating score (fast-clear → s/0.45, Layer 2 → 1 + p, bypass → 2 + s),
-so it reflects the routing. The cascade Brier score is over the Layer-2-adjudicated rows. Positive decision = QUARANTINE.
+Amounts stay log-normal (median KES 1,500, σ 0.9).
 
-| Metric (test partition) | Two-Layer Cascade (`v1.0.0`) | Naive Baseline | Paired Lift |
+**Data and split.** 86,528 rows; 900 injected fraud events (600 commission-stuffing that replace an anchor deposit,
+300 circular-chaining over 40 fixed colluding pairs); 5,146 fraud rows.
+- Split seed 42: test = 120 unseen agents (40%, colluding pairs kept together) in the last 30% of time.
+- The dev agents give train (first 55%) and validation (55–70%).
+- Fraud events: train 319, validation 72, test 104.
+- Validation drops the 1 event (4 rows) that straddles the train/validation cutoff and so also has rows in train.
+
+**Method.**
+- Thresholds are fixed at s 0.45 / 0.72 and p 0.50 / 0.85, and are never tuned on test.
+- Brackets are 95% cluster-bootstrap CIs: 1,000 resamples of the 106 agent components in the test partition.
+- PR-AUC is average precision. The cascade PR-AUC uses the operating score (fast-clear → s/0.45, Layer 2 → 1 + p,
+  bypass → 2 + s), so it reflects the routing.
+- The cascade Brier score is over the Layer-2-adjudicated rows.
+- Positive decision = QUARANTINE.
+
+| Metric (test partition) | Two-Layer Cascade (`v1.1.0`) | Naive Baseline | Paired Lift |
 |---|---|---|---|
-| **PR-AUC** | **0.8255** [0.8020, 0.8478] | 0.1135 [0.0846, 0.1504] | **+0.7120** [0.6840, 0.7351] |
-| **F1** | **0.8694** [0.8519, 0.8854] | 0.0522 [0.0144, 0.0907] | +0.8172 [0.7831, 0.8500] |
-| Precision | 0.9760 [0.9587, 0.9882] | 0.1615 [0.0568, 0.2487] | — |
-| Recall (rows) | 0.7837 [0.7587, 0.8074] | 0.0311 [0.0083, 0.0573] | — |
-| **Event recall** | **0.9917** [0.9716, 1.0000] (119/120; exact [0.9544, 0.9998]) | 0.0833 [0.0333, 0.1405] | +0.9083 [0.8531, 0.9596] |
-| **FPR** | **0.13%** [0.07%, 0.21%] | 1.12% [0.76%, 1.54%] | — |
-| Brier (Layer-2 cohort) | 0.01627 [0.01101, 0.02122] | n/a (rule score is not a probability) | — |
+| **PR-AUC** | **0.8416** [0.8190, 0.8625] | 0.1091 [0.0841, 0.1326] | **+0.7324** [0.7111, 0.7528] |
+| **F1** | **0.8911** [0.8759, 0.9053] | 0.0145 [0.0000, 0.0313] | +0.8767 [0.8574, 0.8960] |
+| Precision | 0.9878 [0.9768, 0.9966] | 0.0549 [0.0000, 0.1038] | — |
+| Recall (rows) | 0.8117 [0.7883, 0.8340] | 0.0083 [0.0000, 0.0187] | — |
+| **Event recall** | **0.9904** [0.9692, 1.0000] (103/104; exact [0.9476, 0.9998]) | 0.0288 [0.0000, 0.0629] | +0.9615 [0.9286, 0.9911] |
+| **FPR** | **0.06%** [0.02%, 0.11%] | 0.85% [0.61%, 1.11%] | — |
+| Brier (Layer-2 cohort) | 0.00886 [0.00428, 0.01363] | n/a (rule score is not a probability) | — |
 
-- **Standalone calibrated XGBoost** (p on every row): PR-AUC 0.8408 [0.8215, 0.8567], F1 0.8909 [0.8781, 0.9017].
+- **Standalone calibrated XGBoost** (p on every row): PR-AUC 0.8452 [0.8243, 0.8613], F1 0.9009 [0.8873, 0.9126].
   The cascade ranks slightly below it because the fast-clear band removes rows from Layer 2.
-- **Event recall by typology:** commission stuffing 84/84 (exact Clopper–Pearson 95% CI [0.9570, 1.0000]; the bootstrap
-  interval collapses to zero width at 100%); circular chaining 35/36 (0.9722, bootstrap [0.9091, 1.0000],
-  exact [0.8547, 0.9993]).
-- **Fast-clear leakage:** 129 of 675 test fraud rows (19.1%) score s < 0.45 and are cleared without Layer 2.
-  No fraud event has every row fast-cleared (0/120). Fast-clear handles 84.8% of all test traffic.
-  - The no-fast-clear ablation (same models) raises F1 to 0.8894 and row recall to 0.8163.
-  - Event recall is unchanged (0.9917) and FPR stays at 0.13%.
-- **Baseline** (fitted on train): amount ceiling KES 14,603.72 (P99.5) and a trailing-24 h count cap of 16 (P99.5).
-- **Latency** (single row): Layer 1 with the compiled traversal averages 0.17 ms (p99 0.40 ms), against 10.59 ms
-  for sklearn `score_samples`. The full cascade averages 1.1 ms, or 2.4 ms with top-3 SHAP.
-- **Stability** (5 repeated splits, seeds 42–46, 98–120 test events each):
-  - PR-AUC (operating) 0.8350 ± 0.0118
-  - F1 0.8661 ± 0.0238
-  - FPR 0.09% ± 0.05%
-  - Event recall 0.9946 ± 0.0050
-  - PR-AUC lift 0.7284 ± 0.0152
+- **Event recall by typology:**
+  - Commission stuffing: 67/67. The bootstrap interval collapses to zero width at 100%, so the exact Clopper–Pearson
+    interval [0.9464, 1.0000] is the one to quote.
+  - Circular chaining: 36/37 (0.9730, bootstrap [0.9118, 1.0000]).
+- **Fast-clear leakage:** 103 of 600 test fraud rows (17.2%) score s < 0.45 and are cleared without Layer 2.
+  No fraud event has every row fast-cleared (0/104). Fast-clear handles 84.2% of all test traffic.
+  - The no-fast-clear ablation (same models) raises F1 to 0.9009 and row recall to 0.8333.
+  - Event recall rises to 1.0000, and FPR rises to 0.10%.
+- **Baseline** (fitted on train): amount ceiling KES 14,845.30 (P99.5) and a trailing-24 h count cap of 17 (P99.5).
+- **Latency** (single row): Layer 1 with the compiled traversal averages 0.22 ms (p99 0.53 ms), against 18.98 ms
+  for sklearn `score_samples`. The full cascade averages 1.9 ms, or 3.4 ms with top-3 SHAP.
+- **Stability** (5 repeated splits, seeds 42–46, 95–113 test events each):
+  - PR-AUC (operating) 0.8471 ± 0.0154
+  - F1 0.8891 ± 0.0124
+  - FPR 0.05% ± 0.02%
+  - Event recall 0.9963 ± 0.0051
+  - PR-AUC lift 0.7396 ± 0.0109
 
 | Directive floor | Requirement | Point | 95% CI | Verdict (point / CI) |
 |---|---|---|---|---|
-| PR-AUC lift | ≥ +0.65 | 0.7120 | [0.6840, 0.7351] | PASS / PASS |
-| F1 | ≥ 0.75 | 0.8694 | [0.8519, 0.8854] | PASS / PASS |
-| FPR | < 0.5% (target < 0.1%) | 0.13% | [0.07%, 0.21%] | PASS / PASS (target 0.1% not met at the point estimate) |
-| Layer-1 latency | < 30 ms (target < 10 ms) | 0.17 ms | n/a | PASS (target met) |
+| PR-AUC lift | ≥ +0.65 | 0.7324 | [0.7111, 0.7528] | PASS / PASS |
+| F1 | ≥ 0.75 | 0.8911 | [0.8759, 0.9053] | PASS / PASS |
+| FPR | < 0.5% (target < 0.1%) | 0.06% | [0.02%, 0.11%] | PASS / PASS (target 0.1% met at the point estimate) |
+| Layer-1 latency | < 30 ms (target < 10 ms) | 0.22 ms | n/a | PASS (target met) |
 
-These figures replace the earlier headline numbers (PR-AUC 0.8205, F1 0.80, FPR 0.051%). Those rested on 2 test
-fraud events and a calibrator fitted on 6, so they were not statistically meaningful. All data is synthetic:
-the ground truth comes from the injectors, and PaySim `isFraud` is never used. These results measure detection
-of the injected typologies, not real-world performance.
+The v1.0.0 numbers (uniform 07:00–21:00 backbone) were PR-AUC lift 0.7120 [0.6840, 0.7351], F1 0.8694
+[0.8519, 0.8854] and FPR 0.13% [0.07%, 0.21%]. The difference is not caused by the calibration alone:
+- v1.1.0 is a fresh random draw.
+- The split cutoffs moved, because `t_min` / `t_max` moved.
+- Under v1.0.0 the only rows outside 07:00–21:00 were slow-chain fraud. Under v1.1.0, benign traffic also runs off-hours.
+
+See `reports/paysim_calibration.md`.
+
+All data is synthetic: the ground truth comes from the injectors, and PaySim `isFraud` is never used. These results
+measure detection of the injected typologies, not real-world performance.
 
 ## Key Thesis Principles Enforced
 

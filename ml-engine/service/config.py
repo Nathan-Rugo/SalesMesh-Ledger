@@ -10,7 +10,7 @@ four introduced by the service-packaging spec):
 =====================  ==========================================  =====================
 Variable               Meaning                                     Default
 =====================  ==========================================  =====================
-MODEL_PATH             joblib artifact (``.sha256`` sidecar next   models/risk_cascade_v1.0.0.joblib
+MODEL_PATH             joblib artifact (``.sha256`` sidecar next   models/risk_cascade_v1.1.0.joblib
                        to it is mandatory)
 MODEL_SHA256           pinned artifact digest (exactly 64 hex);    unset (sidecar only)
                        is refused on mismatch
@@ -47,7 +47,7 @@ class ServiceSettings(BaseSettings):
 
     BASE_DIR: Path = _ROOT
     MODEL_PATH: str = Field(
-        default=str(_ROOT / "models" / "risk_cascade_v1.0.0.joblib"),
+        default=str(_ROOT / "models" / "risk_cascade_v1.1.0.joblib"),
         description="Filesystem path to the serialized RiskCascadePipeline joblib artifact",
     )
     MODEL_SHA256: Optional[str] = Field(

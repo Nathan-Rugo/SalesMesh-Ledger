@@ -522,8 +522,10 @@ def generate_markdown_report(
     md.append(f"- Split seed {sm['seed']}: {sm['total_agents']} agents in {sm['total_components']} components; "
               f"{sm['dev_agents_count']} dev / {sm['test_agents_count']} test agents. "
               f"{sm['events_straddling_time_cutoffs']} events straddle a time cutoff; "
-              f"{sm['val_events_excluded_shared_with_train']} validation events "
-              f"({sm['val_rows_excluded_shared_with_train']} rows) that also have rows in train were excluded "
+              f"{sm['val_events_excluded_shared_with_train']} validation "
+              + ("event" if sm["val_events_excluded_shared_with_train"] == 1 else "events") +
+              f" ({sm['val_rows_excluded_shared_with_train']} rows) with rows also in train "
+              + ("was" if sm["val_events_excluded_shared_with_train"] == 1 else "were") + " excluded "
               "from validation so the calibrator never sees a training event.\n\n")
     md.append("| Partition | Agents | Window | Rows | Fraud rows | Fraud events |\n|---|---|---|---|---|---|\n")
     md.append(f"| Train | {sm['train_agents_count']} (dev) | <= {sm['t_split1']} | {sm['train_rows']:,} | {sm['train_frauds']} | {sm['train_fraud_events']} |\n")

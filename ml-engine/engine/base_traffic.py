@@ -11,11 +11,12 @@ Two modes:
      the SalesMesh transaction schema. Use this once you have a local
      copy of PaySim (it is not bundled here - see README.md).
 
-  2. generate_synthetic_base_traffic() - produces a statistically
-     realistic stand-in when PaySim is not available, so the rest of
-     the pipeline (fraud injection, feature engineering, and later
-     model training) can be built and tested end-to-end without
-     waiting on the dataset.
+  2. generate_synthetic_base_traffic() - the backbone actually used for
+     training. Given the PaySim profile (data/paysim_profile.json, fitted
+     by engine/paysim_profile.py from PAYMENT + CASH_IN rows), its
+     hour-of-day cycle and day-to-day volume multiplier are taken from
+     PaySim; amounts stay log-normal. Without a profile it falls back to
+     the legacy uniform 07:00-21:00 / plain Poisson behaviour (tests).
 
 Per the documentation review (ml_engine_review_and_improvements.md,
 Section 3.2.1), PaySim's native `isFraud` label is NOT used as ground
@@ -27,6 +28,7 @@ that matter for this project come from fraud_injector.py.
 """
 
 from datetime import datetime, timedelta
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -50,12 +52,19 @@ def generate_synthetic_base_traffic(
     amount_sigma: float = 0.9,
     start_date: str = "2026-01-01",
     seed: int = 42,
+    profile: Optional[dict] = None,
 ) -> pd.DataFrame:
     """
-    Produce a synthetic but realistic mobile-money agent transaction
-    backbone: log-normal amounts, Poisson-distributed daily transaction
-    counts per agent, timestamps scattered within business hours
-    (07:00-21:00), and rotating customer counterparties.
+    Produce a synthetic mobile-money agent transaction backbone:
+    log-normal amounts, Poisson daily counts per agent and rotating
+    customer counterparties.
+
+    With ``profile`` (the PaySim profile dict), each day d draws a shared
+    multiplier g_d ~ Gamma(1/CV^2, scale CV^2) (mean 1, CV from PaySim's
+    busy days), each agent-day count is Poisson(avg * g_d), and each
+    timestamp is a categorical hour drawn from PaySim's hour weights plus
+    a uniform offset within that hour. With ``profile=None`` the legacy
+    behaviour is kept exactly: Poisson(avg) and uniform 07:00-21:00.
 
     Every row starts with is_fraud=0 / fraud_type='none' - fraud is
     added afterwards by fraud_injector.py, on top of this backbone.
@@ -64,15 +73,22 @@ def generate_synthetic_base_traffic(
     start = datetime.fromisoformat(start_date)
     agent_ids = [f"AGT{i:05d}" for i in range(n_agents)]
 
+    if profile is not None:
+        from engine.paysim_profile import validate_profile  # lazy: `python -m engine.paysim_profile` would import itself twice
+        validate_profile(profile)
+        hour_weights = np.asarray(profile["hour_weights"], dtype=float)
+        cv2 = float(profile["day_multiplier_cv"]) ** 2
+
     rows = []
     tx_counter = 0
 
     for day in range(n_days):
         day_date = start + timedelta(days=day)
+        day_rate = avg_tx_per_agent_per_day * (1.0 if profile is None else rng.gamma(1.0 / cv2, cv2))
         for agent_id in agent_ids:
-            n_tx = rng.poisson(avg_tx_per_agent_per_day)
+            n_tx = rng.poisson(day_rate)
             for _ in range(n_tx):
-                hour = rng.uniform(7, 21)
+                hour = rng.uniform(7, 21) if profile is None else rng.choice(24, p=hour_weights) + rng.uniform()
                 ts = day_date + timedelta(hours=float(hour))
                 amount = float(rng.lognormal(mean=np.log(amount_median_kes), sigma=amount_sigma))
                 amount = round(min(max(amount, 50.0), 250_000.0), 2)
@@ -112,15 +128,17 @@ def load_paysim_as_base_traffic(
     small) sample of real Daraja sandbox transactions - see the review
     file's "Open questions" section.
 
-    `currency_scale` rescales PaySim's generic amount units if needed;
-    inspect a few rows first and set this so the median amount lands
-    near your expected commission-eligible transaction size.
+    `currency_scale` rescales PaySim's generic amount units; about
+    1500/19190 (~0.078) maps the PAYMENT + CASH_IN median recorded in
+    data/paysim_profile.json onto the synthetic KES 1,500 median.
+    This replay path is reference-only and is not used for training.
     """
     raw = pd.read_csv(csv_path)
     raw = raw[raw["type"].isin(keep_types)].copy()
 
     start = datetime.fromisoformat(start_date)
-    raw["timestamp"] = raw["step"].apply(lambda s: start + timedelta(hours=float(s) * step_hours))
+    # step s covers hours [s-1, s), so step 1 starts at start_date 00:00
+    raw["timestamp"] = raw["step"].apply(lambda s: start + timedelta(hours=float(s - 1) * step_hours))
 
     channel_map = {
         "CASH_OUT": "DARAJA_B2C", "TRANSFER": "DARAJA_STK",

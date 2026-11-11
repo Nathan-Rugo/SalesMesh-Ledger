@@ -248,7 +248,7 @@ class EvaluateResponse(BaseModel):
                     "did not drive the decision and is an audit value only.",
         examples=[0.0241],
     )
-    model_version: str = Field(..., description="Identifier of the trained model artifact (NFR-09)", examples=["v1.0.0"])
+    model_version: str = Field(..., description="Identifier of the trained model artifact (NFR-09)", examples=["v1.1.0"])
     model_sha256: str = Field(..., description="SHA-256 of the loaded model artifact (NFR-09)")
     decision: Literal["CLEAR", "QUARANTINE", "REVIEW"] = Field(
         ..., description="CLEAR (advance to escrow), QUARANTINE (freeze), REVIEW (flagged)", examples=["CLEAR"],
