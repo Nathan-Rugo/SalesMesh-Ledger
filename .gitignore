@@ -53,6 +53,10 @@ htmlcov/
 Thumbs.db
 
 data/
+# The fitted PaySim profile is a committed input to generate_dataset.py (the PaySim CSV itself never is).
+!ml-engine/data/
+ml-engine/data/*
+!ml-engine/data/paysim_profile.json
 pg_data/
 redis_data/
 

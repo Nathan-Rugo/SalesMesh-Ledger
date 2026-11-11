@@ -102,7 +102,7 @@ class RiskCascadePipeline:
 
     def __init__(
         self,
-        model_version: str = "v1.0.0",
+        model_version: str = "v1.1.0",
         isolation_contamination: float = 0.01,
         isolation_estimators: int = 100,
         xgb_max_depth: int = 6,

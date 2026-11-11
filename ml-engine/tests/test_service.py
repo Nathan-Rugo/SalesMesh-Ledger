@@ -43,7 +43,7 @@ def test_health_check(client):
     data = response.json()
     assert data["status"] == "healthy"
     assert data["model_loaded"] is True
-    assert data["model_version"] == "v1.0.0"
+    assert data["model_version"] == "v1.1.0"
     assert len(data["feature_columns"]) == 6
     assert data["uptime_seconds"] >= 0.0
 
@@ -53,7 +53,7 @@ def test_model_info(client):
     response = client.get("/model/info")
     assert response.status_code == 200
     data = response.json()
-    assert data["model_version"] == "v1.0.0"
+    assert data["model_version"] == "v1.1.0"
     assert "quarantine_isolation_threshold" in data["thresholds"]
     assert "quarantine_xgb_threshold" in data["thresholds"]
     assert data["thresholds"]["quarantine_isolation_threshold"] == 0.72
@@ -83,7 +83,7 @@ def test_evaluate_benign_transaction_nested(client):
     data = response.json()
     assert data["transaction_id"] == "TXN_BENIGN_001"
     assert data["decision"] == "CLEAR"
-    assert data["model_version"] == "v1.0.0"
+    assert data["model_version"] == "v1.1.0"
     assert 0.0 <= data["isolation_score"] <= 1.0
     assert 0.0 <= data["xgb_probability"] <= 1.0
     assert len(data["top_shap_features"]) <= 3
@@ -132,7 +132,7 @@ def test_evaluate_extreme_anomaly_quarantine(client):
     data = response.json()
     assert data["transaction_id"] == "TXN_FRAUD_STUFFING_001"
     assert data["decision"] == "QUARANTINE"
-    assert data["model_version"] == "v1.0.0"
+    assert data["model_version"] == "v1.1.0"
     assert len(data["top_shap_features"]) > 0
 
 
@@ -525,7 +525,7 @@ def test_missing_model_is_not_ready(tmp_path):
 
 
 def test_tampered_model_is_not_ready(tmp_path):
-    path = tmp_path / "risk_cascade_v1.0.0.joblib"
+    path = tmp_path / "risk_cascade_v1.1.0.joblib"
     shutil.copyfile(SHIPPED_MODEL, path)
     shutil.copyfile(SHIPPED_MODEL + ".sha256", str(path) + ".sha256")
     with open(path, "ab") as fh:
@@ -675,7 +675,7 @@ def test_route_handlers_are_sync():
 
 @pytest.mark.parametrize("bad", [
     "sha256:" + "a" * 64,
-    "a" * 64 + "  risk_cascade_v1.0.0.joblib",
+    "a" * 64 + "  risk_cascade_v1.1.0.joblib",
     "a" * 63,
     "g" * 64,
 ])

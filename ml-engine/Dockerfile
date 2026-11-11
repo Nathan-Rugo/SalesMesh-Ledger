@@ -22,7 +22,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH=/opt/venv/bin:$PATH \
     HOST=0.0.0.0 \
     PORT=8000 \
-    MODEL_PATH=/app/models/risk_cascade_v1.0.0.joblib
+    MODEL_PATH=/app/models/risk_cascade_v1.1.0.joblib
 
 # libgomp1: OpenMP runtime needed by the xgboost and scikit-learn wheels. No compilers.
 RUN apt-get update \

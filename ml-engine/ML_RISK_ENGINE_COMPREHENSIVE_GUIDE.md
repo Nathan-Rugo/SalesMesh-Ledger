@@ -18,7 +18,7 @@ In distributed mobile-money retail agent networks (e.g., M-Pesa, Safaricom Daraj
 Standard commercial anti-fraud engines (e.g., generic rules or basic classification) fail in this domain because:
 - **Static business rules** (e.g., flagging amounts $> \text{KES } 10,000$) create astronomical false positive rates ($> 6.5\%$) on legitimate high-value commerce while failing to detect stuffing, which intentionally stays below threshold ceilings.
 - **Off-the-shelf datasets (like PaySim)** model *account-takeover* (unauthorized draining of credentials), an entirely different fraud signature that teaches machine learning algorithms irrelevant features.
-- **Extreme Class Imbalance** ($\sim 1.3\%$ fraud rate) causes uncalibrated supervised models to output extreme, ungrounded confidence scores.
+- **Class Imbalance** (about 6% fraud rows in the `v1.1.0` dataset) causes uncalibrated supervised models to output extreme, ungrounded confidence scores.
 
 To solve this, **Module 2 implements a Two-Layer Risk Cascade**:
 An unsupervised **Isolation Forest** pre-filter ($<30\text{ ms}$) screens raw streaming transactions, rapidly clearing obvious benign traffic, while isolating candidate anomalies for a supervised, **isotonic-calibrated XGBoost classifier** equipped with **SHAP TreeExplainer** interpretability.
@@ -70,7 +70,7 @@ An unsupervised **Isolation Forest** pre-filter ($<30\text{ ms}$) screens raw st
                                                  ▼
                  ┌────────────────────────────────────────────────────────┐
                  │            Audit & Blockchain Traceability             │
-                 │ • Persistent response with model_version: "v1.0.0"     │
+                 │ • Persistent response with model_version: "v1.1.0"     │
                  │ • Committed to Hyperledger Fabric for non-repudiation  │
                  └────────────────────────────────────────────────────────┘
 ```
@@ -82,10 +82,10 @@ An unsupervised **Isolation Forest** pre-filter ($<30\text{ ms}$) screens raw st
 Examiners frequently ask: *"Why combine an unsupervised model with a supervised model instead of choosing just one?"*
 
 ### Problem 1: The Severe Class Imbalance Trap
-In retail transaction streams, fraudulent transactions represent only $\approx 1.3\%$ of traffic. If a supervised classifier (like XGBoost) is trained directly on the raw transaction stream, the extreme skew degrades minority-class gradient updates. Resampling techniques (such as SMOTE or random oversampling) distort the underlying distribution of retail behavior.
+In retail transaction streams, fraudulent transactions are a small minority ($\approx 6\%$ of rows in the `v1.1.0` dataset: 5,146 of 86,528; 6.4% of the training partition). If a supervised classifier (like XGBoost) is trained directly on the raw transaction stream, the skew degrades minority-class gradient updates. Resampling techniques (such as SMOTE or random oversampling) distort the underlying distribution of retail behavior.
 
 **Our Architectural Solution:**
-Layer 1 acts as a structural filter. Because the unsupervised Isolation Forest removes the vast majority of clearly benign transactions ($s < 0.45$), the **candidate anomaly cohort** presented to Layer 2 has a significantly higher concentration of fraud ($\approx 7.3\%$ vs. $1.3\%$). This reduces the effective class imbalance naturally by a factor of 5.6x before XGBoost begins training.
+Layer 1 acts as a structural filter. Because the unsupervised Isolation Forest removes most clearly benign transactions ($s < 0.45$), the **candidate anomaly cohort** presented to Layer 2 has a much higher concentration of fraud: in `v1.1.0` training, 1,502 of 5,193 candidate rows (28.9%) against 1,817 of 28,476 rows (6.4%) overall, about 4.5x denser before XGBoost begins training.
 
 ### Problem 2: The Online Latency Budget
 High-volume payment networks require rapid responses. Running complex tree ensemble traversals and computing SHAP attribution values on every transaction would saturate server CPU resources.
@@ -105,7 +105,11 @@ A critical flaw in standard academic fraud research is using PaySim’s native `
 Training an algorithm on account takeover signals teaches it to look for account-clearing transfers, which are completely irrelevant to commission splitting.
 
 **Methodological Solution (Thesis Section 3.2.1):**
-1. **PaySim as Realistic Background Traffic:** PaySim is utilized strictly as a statistical backbone to supply realistic transactional volume, time-of-day circadian patterns, and log-normal monetary distributions.
+1. **PaySim-Calibrated Background Traffic:** The base traffic is synthetic, but two of its properties are fitted to the real PaySim1 CSV (Lopez-Rojas et al., 2016; Kaggle `ealaxi/paysim1`, CC BY-SA 4.0) by a streamed profiler (`engine/paysim_profile.py`), and the fitted parameters are committed in `data/paysim_profile.json`. The fit uses PAYMENT + CASH_IN rows only; `isFraud` is never read.
+   - **Diurnal cycle:** 24 pooled hour-of-day weights. The peak is 17:00–19:59; night (00:00–06:59) carries 1.1% of the weight, and no hour is empty. PaySim step *s* is taken as hour (s−1), so step 1 = 00:00: an assumption supported by the 07:00 → 08:00 jump in the weights (0.46% → 4.56%), which matches a business day opening. A phase shift is a known limitation.
+   - **Day-to-day volume:** a shared daily multiplier g ~ Gamma(mean 1, CV 0.113), using the CV of PaySim's 14 busy days (bootstrap 95% interval [0.041, 0.162], so this part is fitted only loosely). The near-empty days are a PaySim scheduling artifact and are excluded.
+
+   Amounts stay log-normal (median KES 1,500, σ 0.9). PaySim's amount quantiles are recorded for reference only. See `reports/paysim_calibration.md`.
 2. **Purpose-Built Synthetic Fraud Injectors:** A mathematically rigorous synthetic fraud injection engine (`engine/fraud_injector.py`) superimposes real-world commission fraud patterns directly on top of the traffic:
    - **Commission Stuffing Generator:** Selects an agent and replaces a transaction with $k \in [3, 7]$ sub-threshold bursts ($A_k < \theta$, where $\theta = \text{KES } 5,000$) within a sliding 20-minute window, whose cumulative sum exceeds $\theta$.
    - **Circular Chaining Generator:** Selects a pair of colluding agent accounts and injects an alternating sequence of $m \in [4, 8]$ rapid transfers between them within 24 hours, returning the float to the origin with no end-customer retail sale.
@@ -160,22 +164,30 @@ $$P(\text{Fraud} \mid x) = \text{IsotonicRegressor}(P_{\text{raw XGBoost}}(x))$$
 
 ## 6. Empirical Results & Baseline Comparison
 
-The two-layer cascade was benchmarked against a **Naive Rule-Based Baseline** (a static ceiling on single-transaction amount $> \text{KES } 10,000$ and hourly frequency cap $> 10\text{ tx/hr}$):
+The two-layer cascade was benchmarked against a **Naive Rule-Based Baseline** (an amount ceiling and a trailing-24 h count cap, both fitted on train at P99.5):
 
-### Test Set Performance (81,963 Total Transactions, 1,965 Held-Out Test Transactions)
+### Test Set Performance (`v1.1.0`: 86,528 rows, 10,741 test rows, 104 test fraud events)
 
-| Evaluation Metric | Two-Layer Cascade (`v1.0.0`) | Naive Rule Baseline | Empirical Lift / Significance |
+Brackets are 95% cluster-bootstrap CIs (1,000 resamples over the 106 test agent components). The baseline is fitted on
+train: amount ceiling KES 14,845 (P99.5) and a trailing-24 h count cap of 17 (P99.5).
+
+| Evaluation Metric | Two-Layer Cascade (`v1.1.0`) | Naive Rule Baseline | Paired Lift |
 |---|---|---|---|
-| **PR-AUC (Primary Metric)** | **0.8205** | 0.0933 | **+0.7272 lift** |
-| **F1-Score** | **0.8000** | 0.0839 | **+0.7161 lift** |
-| **Precision** | **85.71%** | 4.44% | **+81.27% precision lift** |
-| **Recall** | **75.00%** | 75.00% | Equal coverage, drastically fewer false alerts |
-| **False Positive Rate (FPR)** | **0.051%** *(PASS)* | 6.592% *(FAIL)* | **99.2% reduction in wrongful account freezes** |
-| **Brier Score (Calibration)** | **0.001412** | 0.067970 | **97.9% reduction in probabilistic error** |
-| **Layer 1 Latency** | **~5.2 ms** | — | **Complies with NFR-02 (<30 ms SLA)** |
+| **PR-AUC (Primary Metric)** | **0.8416** [0.8190, 0.8625] | 0.1091 [0.0841, 0.1326] | **+0.7324** [0.7111, 0.7528] |
+| **F1-Score** | **0.8911** [0.8759, 0.9053] | 0.0145 [0.0000, 0.0313] | +0.8767 [0.8574, 0.8960] |
+| **Precision** | **98.78%** [97.68%, 99.66%] | 5.49% [0.00%, 10.38%] | — |
+| **Recall (rows)** | **81.17%** [78.83%, 83.40%] | 0.83% [0.00%, 1.87%] | — |
+| **Event recall** | **103/104** (0.9904) | 3/104 (0.0288) | +0.9615 [0.9286, 0.9911] |
+| **False Positive Rate (FPR)** | **0.06%** [0.02%, 0.11%] *(PASS)* | 0.85% [0.61%, 1.11%] | — |
+| **Brier Score (Layer-2 cohort)** | **0.00886** [0.00428, 0.01363] | n/a | — |
+| **Layer 1 Latency** | **0.22 ms** mean (compiled traversal) | — | **Complies with NFR-02 (<30 ms SLA)** |
+
+Full detail and the v1.0.0 comparison: `README.md` (Measured Evaluation), `reports/evaluation_report.md` and
+`reports/paysim_calibration.md`.
 
 ### Why False Positive Rate (FPR) is Critical for Business Morale:
-Under the naive rule baseline, **6.59% of innocent transactions are flagged and frozen** (129 false positives in the test set). In a retail agent network, freezing commission on 1 out of every 15 legitimate sales would cause immediate agent revolt and operational paralysis. The ML cascade drops the FPR to **0.051%** (only 1 false positive out of 1,957 legitimate transactions), easily surpassing the thesis threshold of **$< 0.5\%$**.
+Under the naive rule baseline, **0.85% of innocent test transactions are flagged** (about 86 of 10,141). The cascade
+flags **6** (FPR 0.06%), well under the directive's **$< 0.5\%$** floor and its 0.1% target.
 
 ---
 
@@ -186,22 +198,23 @@ Thesis Section 3.5.4 specifies that an Isolation Forest score $s(x, n) \ge 0.72$
 
 | Policy Mode | PR-AUC | False Positives | Recall | Operational Impact |
 |---|---|---|---|---|
-| **Bypass Enabled (Thesis as written)** | **0.8205** | 1 | 75.0% | Fastest decision on extreme outliers; latency $< 6\text{ ms}$ |
-| **Bypass Disabled (XGBoost always adjudicates)** | **0.8205** | 0 | 75.0% | Eliminates 1 false positive; requires full XGBoost inference |
+| **Bypass Enabled (Thesis as written)** | **0.8416** | 6 | 81.2% | Fastest decision on extreme outliers |
+| **Bypass Disabled (XGBoost always adjudicates)** | **0.8414** | 6 | 81.2% | Same flags; requires full XGBoost inference |
 
-**Thesis Conclusion:** The bypass rule trades 1 false positive for accelerated sub-6ms decision finality on the rarest, most extreme anomalies ($< 0.08\%$ of traffic).
+**Thesis Conclusion (v1.1.0):** On this test partition the bypass rule changes no decision (same false positives and recall); it only short-circuits the rarest, most extreme anomalies (about 0.1% of traffic).
 
 ### Ablation 2: Repeated-Split Stability Check (`engine/stability.py`)
-Because retail fraud is rare, a single test split contains a finite number of fraud instances (8 to 29). To confirm that our results were not an artifact of random seed selection, we executed **5 independent agent-grouped split-fit-evaluate cycles**:
+Because retail fraud is rare, a single test split contains a finite number of fraud events (95 to 113 per split in `v1.1.0`). To confirm that our results were not an artifact of random seed selection, we executed **5 independent agent-grouped split-fit-evaluate cycles**:
 
 | Metric | Mean Across 5 Repeats | Standard Deviation ($\sigma$) | Observed Range |
 |---|---|---|---|
-| **PR-AUC** | **0.7872** | 0.0703 | 0.6583 – 0.8721 |
-| **F1-Score** | **0.7790** | 0.0560 | 0.6875 – 0.8421 |
-| **Precision** | **0.9134** | 0.0709 | 0.8462 – 1.0000 |
-| **False Positive Rate** | **0.0006** | 0.0006 | 0.0000 – 0.0015 |
+| **PR-AUC (operating score)** | **0.8471** | 0.0154 | 0.8275 – 0.8700 |
+| **F1-Score** | **0.8891** | 0.0124 | 0.8765 – 0.9092 |
+| **Precision** | **0.9903** | 0.0037 | 0.9868 – 0.9961 |
+| **False Positive Rate** | **0.0005** | 0.0002 | 0.0002 – 0.0006 |
+| **Event recall** | **0.9963** | 0.0051 | 0.9904 – 1.0000 |
 
-The primary split result (PR-AUC 0.8205) sits securely within the empirical distribution, confirming that the engine generalizes reliably across agent cohorts.
+The primary split result (PR-AUC 0.8416) sits within the empirical distribution, confirming that the engine generalizes reliably across agent cohorts.
 
 ---
 
@@ -238,7 +251,7 @@ The engine is packaged as an asynchronous **FastAPI** microservice (`service/app
   "transaction_id": "TXN_20261001_882910",
   "isolation_score": 0.6124,
   "xgb_probability": 0.8942,
-  "model_version": "v1.0.0",
+  "model_version": "v1.1.0",
   "decision": "QUARANTINE",
   "triggered_layer": 2,
   "reason": "Layer 2 Calibrated XGBoost confidence (0.8942) >= threshold (0.85)",
@@ -271,13 +284,13 @@ In `integration/risk_client.ts` (the Node.js / TypeScript Gateway Client), an au
   {
     decision: "QUARANTINE",
     reason: "Fail-safe default: ML microservice unreachable/timed out (NFR-08)",
-    model_version: "v1.0.0-failsafe"
+    model_version: "v1.1.0-failsafe"
   }
   ```
   **Policy Guarantee:** The system defaults strictly to `QUARANTINE`, never `CLEAR`. Legitimate funds may be momentarily held for manual review, but fraudulent payouts can never leak into escrow during an outage.
 
 ### 2. Immutable Ledger Traceability (NFR-09)
-Every evaluation response carries `model_version: "v1.0.0"`. 
+Every evaluation response carries `model_version: "v1.1.0"`. 
 When the Node.js Gateway advances a `CLEAR` transaction to **Module 3 (Hyperledger Fabric)**, the smart contract (`commitTransaction`) writes the exact `model_version` into the immutable transaction state block. This satisfies non-repudiation and enables closed-loop model retraining audits.
 
 ---
@@ -286,30 +299,33 @@ When the Node.js Gateway advances a `CLEAR` transaction to **Module 3 (Hyperledg
 
 | Question an Examiner Will Ask | Your Prepared Answer |
 |---|---|
-| *"Why didn't you just use PaySim's fraud column?"* | *"PaySim's `isFraud` represents account takeover (identity theft and account draining). Our capstone targets first-party agent collusion: commission stuffing and circular chaining. Training on PaySim's native labels would learn the wrong signatures. We used PaySim for base traffic volume and amount distributions, but injected mathematically defined ground truth matching Equations 3.1 and 3.2."* |
-| *"How did you handle the 1.3% class imbalance?"* | *"Architecturally, rather than through artificial synthetic sampling. The Layer 1 Isolation Forest acts as a pre-filter, stripping away over 80% of benign traffic. The candidate cohort passed to XGBoost has a 5.6x higher fraud density, which stabilizes boosting. We then tuned `scale_pos_weight` directly on this candidate subset."* |
-| *"What does 0.85 confidence actually mean?"* | *"On raw XGBoost, tree margin outputs are compressed and cannot be interpreted as probabilities. We applied non-parametric Isotonic Regression on held-out validation predictions to calibrate the margin into an empirical posterior probability $P(\text{Fraud} \mid x) \ge 0.85$. This dropped our Brier calibration score by 98%."* |
+| *"Why didn't you just use PaySim's fraud column?"* | *"PaySim's `isFraud` represents account takeover (identity theft and account draining). Our capstone targets first-party agent collusion: commission stuffing and circular chaining. Training on PaySim's native labels would learn the wrong signatures. We fitted the base traffic's hour-of-day cycle and day-to-day volume variation to PaySim's PAYMENT and CASH_IN rows (never its labels), and injected mathematically defined ground truth matching Equations 3.1 and 3.2."* |
+| *"How did you handle the class imbalance?"* | *"Architecturally, rather than through artificial synthetic sampling. The Layer 1 Isolation Forest acts as a pre-filter: on the `v1.1.0` test partition it fast-clears 88.2% of benign rows. The candidate cohort passed to XGBoost in training is 28.9% fraud against 6.4% overall, about 4.5x denser, which stabilizes boosting. We then set `scale_pos_weight` (2.46) from this candidate subset."* |
+| *"What does 0.85 confidence actually mean?"* | *"Raw XGBoost scores are not probabilities, so we fitted non-parametric Isotonic Regression on held-out validation candidates to map them to an approximately calibrated $P(\text{Fraud} \mid x)$. On the `v1.1.0` test Layer-2 cohort, the 482 rows with $p \ge 0.85$ have mean p 0.992 and an observed fraud rate of 98.8%, and the cohort Brier score is 0.0089 [0.0043, 0.0136]."* |
 | *"How do you prove there is no data leakage?"* | *"We implemented chronological and agent-grouped partitioning (Dal Pozzolo et al., 2018). All splits strictly follow time progression, and agents in the test partition were never seen during training. The model is proven to generalize to brand-new agents in future time periods."* |
 | *"What happens if the ML microservice goes down?"* | *"Non-Functional Requirement NFR-08 dictates a fail-safe default. The Node.js gateway client has a 500ms timeout budget. If the microservice fails, the client automatically defaults to QUARANTINE, preventing unvetted transactions from ever reaching the escrow ledger."* |
 
 ---
 
-## 11. Verification Evidence (25/25 Pytest Suite)
+## 11. Verification Evidence (pytest suite)
 
-The implementation has been independently verified across 25 unit and integration tests:
+The ml-engine suite holds 150 tests (`python -m pytest -q`, from `ml-engine/` in the pinned `.venv`):
 
 ```text
-============================= test session starts =============================
-tests/test_pipeline.py            8 PASSED  (Traffic generation, injectors, feature math)
-tests/test_service.py             8 PASSED  (FastAPI endpoints, SHAP rankings, schema validation)
-tests/test_training_pipeline.py   9 PASSED  (Partitioning disjointness, calibration, latency SLA)
-============================= 25 passed in 21.25s =============================
+tests/test_evaluation.py          13  (Cluster bootstrap, event recall, train CLI, acceptance on shipped artifacts)
+tests/test_paysim_profile.py      36  (PaySim profiler, profile validation, calibrated hours, replay, determinism)
+tests/test_pipeline.py            19  (Traffic generation, injectors, feature math, batch/online parity)
+tests/test_service.py             61  (FastAPI endpoints, SHAP, schema validation, fail-safe error matrix)
+tests/test_training_pipeline.py   21  (Partitioning disjointness, calibration, artifact integrity, latency)
 ```
 
-**Delivered Artifacts:**
-- Core Package: [`engine/`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/engine) (`cascade.py`, `features.py`, `split.py`, `eval.py`, `stability.py`)
-- API Service: [`service/`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/service) (`app.py`, `schemas.py`, `config.py`)
-- Gateway Client: [`integration/risk_client.ts`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/integration/risk_client.ts)
-- Container: [`Dockerfile`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/Dockerfile), [`docker-compose.yml`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/docker-compose.yml)
-- Serialized Model: [`models/risk_cascade_v1.0.0.joblib`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/models/risk_cascade_v1.0.0.joblib)
-- Metrics & Ablation Data: [`reports/metrics.json`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/reports/metrics.json), [`reports/evaluation_report.md`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/reports/evaluation_report.md)
+**Delivered Artifacts** (paths relative to `ml-engine/`):
+- Core Package: [`engine/`](engine) (`cascade.py`, `features.py`, `split.py`, `eval.py`, `stability.py`, `base_traffic.py`)
+- PaySim Profiler: [`engine/paysim_profile.py`](engine/paysim_profile.py) and its fitted output [`data/paysim_profile.json`](data/paysim_profile.json)
+- API Service: [`service/`](service) (`app.py`, `schemas.py`, `config.py`)
+- Gateway Client: [`integration/risk_client.ts`](integration/risk_client.ts)
+- Container: [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml)
+- Serialized Model: [`models/risk_cascade_v1.1.0.joblib`](models/risk_cascade_v1.1.0.joblib)
+- Metrics & Ablation Data: [`reports/metrics.json`](reports/metrics.json), [`reports/evaluation_report.md`](reports/evaluation_report.md)
+- PaySim Calibration Report: [`reports/paysim_calibration.md`](reports/paysim_calibration.md)
+- Tests: [`tests/`](tests), including [`tests/test_paysim_profile.py`](tests/test_paysim_profile.py)

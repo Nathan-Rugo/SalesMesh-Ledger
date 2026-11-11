@@ -58,7 +58,7 @@ export class MLRiskEngineClient {
   constructor(
     baseURL: string = process.env.ML_ENGINE_URL || "http://localhost:8000",
     timeoutMs: number = parseInt(process.env.ML_ENGINE_TIMEOUT_MS || "500", 10),
-    fallbackModelVersion: string = "v1.0.0-failsafe"
+    fallbackModelVersion: string = "v1.1.0-failsafe"
   ) {
     this.fallbackModelVersion = fallbackModelVersion;
     this.client = axios.create({
