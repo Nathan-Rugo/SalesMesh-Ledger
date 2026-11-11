@@ -22,6 +22,7 @@ export function createAdminRouter(controller: AdminController = new AdminControl
 
   const json = express.json({ limit: '4kb' });
 
+  router.get('/agents', noStore, admin, wrap((req, res) => controller.agents(req, res)));
   router.get('/frozen-payouts', noStore, admin, wrap((req, res) => controller.frozenPayouts(req, res)));
   router.post('/escrows/:id/release', noStore, admin, json, wrap((req, res) => controller.overrideEscrow(req, res, 'release')));
   router.post('/escrows/:id/keep', noStore, admin, json, wrap((req, res) => controller.overrideEscrow(req, res, 'keep')));
