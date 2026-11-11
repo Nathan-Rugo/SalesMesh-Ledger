@@ -6,8 +6,11 @@
 
 /** Percentile p ∈ [0, 100] by linear interpolation between order statistics (numpy's default). */
 export function percentile(values: readonly number[], p: number): number | null {
-  if (values.length === 0) return null;
-  const s = [...values].sort((a, b) => a - b);
+  return percentileSorted([...values].sort((a, b) => a - b), p);
+}
+
+function percentileSorted(s: readonly number[], p: number): number | null {
+  if (s.length === 0) return null;
   const h = (s.length - 1) * (p / 100);
   const lo = Math.floor(h);
   const hi = Math.ceil(h);
@@ -16,13 +19,15 @@ export function percentile(values: readonly number[], p: number): number | null 
 
 /** p50 / p95 / p99 / max / mean of a sample (null fields when empty). */
 export function summarise(values: readonly number[]) {
+  // Sorted once; no Math.max(...values), which overflows the stack on ~100k samples.
+  const s = [...values].sort((a, b) => a - b);
   return {
-    n: values.length,
-    p50: percentile(values, 50),
-    p95: percentile(values, 95),
-    p99: percentile(values, 99),
-    max: values.length ? Math.max(...values) : null,
-    mean: values.length ? values.reduce((a, b) => a + b, 0) / values.length : null,
+    n: s.length,
+    p50: percentileSorted(s, 50),
+    p95: percentileSorted(s, 95),
+    p99: percentileSorted(s, 99),
+    max: s.length ? s[s.length - 1] : null,
+    mean: s.length ? s.reduce((a, b) => a + b, 0) / s.length : null,
   };
 }
 

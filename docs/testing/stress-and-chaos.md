@@ -72,6 +72,8 @@ MPESA_CALLBACK_TOKEN=... DATABASE_URL=postgres://... \
 - 0 ACKed receipts missing from `mpesa_callbacks` (when `DATABASE_URL` is set)
 - an achieved rate of at least 95% of the target
 
+With `DATABASE_URL` set, the script seeds the `--agent-code` agent first (idempotently), so rows settle on the known-agent path. It then checks every *sent* receipt: "lost" means ACKed with no row, and rows for non-ACKed sends are reported separately. Without `DATABASE_URL` the agent isn't seeded and the worker parks rows UNRESOLVED after the ACK. The measured hot path is the same either way, and the JSON's `config.agent_path` records which path ran.
+
 **Stuffing e2e.** This is a TypeScript port of `ml-engine/engine/fraud_injector.py`:
 
 - θ = 5000; the anchor A (log-normal, median 1500, σ 0.9, as in `base_traffic.py`) is drawn in (θ, 6.79θ].
@@ -85,8 +87,8 @@ An event counts as detected when any split got a non-CLEAR INITIAL decision, the
 
 | Run | Environment | Result |
 |---|---|---|
-| Tier 1, CI | GitHub Actions, Postgres 16 + Redis 7 services | Pending (first CI run on this branch) |
-| Tier 1, local | Ryzen 5 5625U, 12 threads, 7.35 GB RAM | `stats.test.ts` 14/14 pass. Resilience suites **not yet run locally**: Docker Desktop stopped (low memory) during verification |
+| Tier 1, CI | GitHub Actions, Postgres 16 + Redis 7 services | PASS: `test` job green on PR #66 ([run 42987709489](https://github.com/Nathan-Rugo/SalesMesh-Ledger/actions/runs/42987709489)) |
+| Tier 1, local (2026-11-11) | Ryzen 5 5625U, 12 threads, 7.35 GB RAM, Node 24, Docker Postgres 16 + Redis 7 | PASS: duplicates 3/3 (twice in a row), chaos 5/5, fuliza 1/1, `stats.test.ts` 14/14. Full gateway suite 711 passed, 2 skipped (ledger e2e needs Fabric) |
 | Load 200 req/s, 60 s, local compose | Pending | Record it honestly even if it falls below 200/s |
 | Load 200 req/s, 60 s, EC2 (pass of record) | Pending, after the AWS runbook | — |
 | Stuffing e2e (≥100 events) | Pending, needs the ml-engine reachable | Compare against the offline 84/84 (CI-low 0.957) |
@@ -94,4 +96,13 @@ An event counts as detected when any split got a non-CLEAR INITIAL decision, the
 
 ## Defects found
 
-None so far. Any defect a test exposes gets fixed in scope and recorded here as test → defect → fix.
+No gateway defects so far. Any defect a test exposes gets fixed in scope and recorded here as test → defect → fix.
+
+Harness defects (test code, not the gateway):
+
+| Test | Defect | Fix |
+|---|---|---|
+| Replay storm (`duplicates.int.test.ts`) | 250 simultaneous connects overflowed the Windows listen backlog, so requests failed with `ECONNREFUSED` before reaching the gateway | At most 25 requests in flight. The 5 copies of each receipt are adjacent, so they still race each other |
+| Fault proxy under `latency()` | `close` destroyed the peer while delayed chunks were pending, so latency turned into truncated replies | The destroy is delayed by the same `delayMs` as `end` |
+| Flaky Postgres (`dropEvery`) | A socket reset by the proxy surfaced as transport status 0 and failed the test, although the gateway behaved | 0 is treated like a 503: Daraja retries both |
+| Chaos suite, first test (`chaos.int.test.ts`) | On a loaded machine, cold hot-pool connects (SCRAM auth through the proxy) took longer than the 150 ms deadline, so deliveries got 503 before any fault was injected | `beforeAll` warms the hot pool, retrying until 10 idle connections exist |

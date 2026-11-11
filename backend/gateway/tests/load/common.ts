@@ -18,14 +18,30 @@ export function flags<T extends Record<string, string>>(defaults: T, argv = proc
     const m = /^--([\w-]+)(?:=(.*))?$/.exec(argv[i]);
     if (!m) throw new Error(`unexpected argument ${argv[i]}`);
     if (!(m[1] in defaults)) throw new Error(`unknown flag --${m[1]} (known: ${Object.keys(defaults).join(', ')})`);
-    out[m[1]] = m[2] ?? argv[++i] ?? '';
+    const v = m[2] ?? argv[++i];
+    if (v === undefined || (m[2] === undefined && v.startsWith('--'))) throw new Error(`--${m[1]} needs a value`);
+    out[m[1]] = v;
   }
   return out as T;
 }
 
 export function num(v: string, name: string): number {
   const n = Number(v);
-  if (!Number.isFinite(n) || n < 0) throw new Error(`--${name} must be a non-negative number, got "${v}"`);
+  if (v.trim() === '' || !Number.isFinite(n) || n < 0) throw new Error(`--${name} must be a non-negative number, got "${v}"`);
+  return n;
+}
+
+/** A positive number (> 0). */
+export function pos(v: string, name: string): number {
+  const n = num(v, name);
+  if (n <= 0) throw new Error(`--${name} must be > 0, got "${v}"`);
+  return n;
+}
+
+/** A count: an integer >= 1. */
+export function count(v: string, name: string): number {
+  const n = num(v, name);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`--${name} must be an integer >= 1, got "${v}"`);
   return n;
 }
 
@@ -89,6 +105,10 @@ export function request(url: string, opts: { method?: string; body?: unknown; ag
         res.resume(); // drain so keep-alive sockets are reused
         res.on('end', () => resolve({ status: res.statusCode ?? 0 }));
         res.on('error', (e) => resolve({ status: 0, error: e.message }));
+        // Socket destroyed after the headers: neither 'end' nor 'error' fires (resolve is idempotent).
+        res.on('close', () => {
+          if (!res.complete) resolve({ status: 0, error: 'aborted' });
+        });
       }
     );
     req.setTimeout(opts.timeoutMs ?? 5_000, () => req.destroy(new Error('timeout')));
