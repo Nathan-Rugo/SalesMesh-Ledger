@@ -80,8 +80,8 @@ def _log(verbose: bool, msg: str) -> None:
 
 def train_and_evaluate(
     dataset_path: str,
-    model_version: str = "v1.0.0",
-    output_model: Optional[str] = "models/risk_cascade_v1.0.0.joblib",
+    model_version: str = "v1.1.0",
+    output_model: Optional[str] = "models/risk_cascade_v1.1.0.joblib",
     output_report: Optional[str] = "reports/evaluation_report.md",
     output_metrics: Optional[str] = "reports/metrics.json",
     seed: int = 42,
@@ -160,7 +160,7 @@ def train_and_evaluate(
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train and evaluate the SalesMesh ML risk cascade.")
     p.add_argument("--dataset", default="salesmesh_fraud_dataset.csv", help="Featured dataset CSV.")
-    p.add_argument("--model-version", default="v1.0.0", help="Model version tag (<= 20 chars).")
+    p.add_argument("--model-version", default="v1.1.0", help="Model version tag (<= 20 chars).")
     p.add_argument("--output-model", default=None, help="Artifact path (default models/risk_cascade_<version>.joblib).")
     p.add_argument("--output-report", default="reports/evaluation_report.md")
     p.add_argument("--output-metrics", default="reports/metrics.json")

@@ -183,7 +183,7 @@ describeDb('settlement pipeline (real Postgres)', () => {
       decision: 'QUARANTINE',
       isolation_forest_score: null,
       xgboost_fraud_prob: null,
-      model_version: 'v1.0.0-failsafe',
+      model_version: 'v1.1.0-failsafe',
     });
   });
 

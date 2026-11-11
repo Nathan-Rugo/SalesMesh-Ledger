@@ -41,7 +41,7 @@ jobs:
         run: docker build -t salesmesh-ml-engine:ci ml-engine
       - name: Run container and wait for its own HEALTHCHECK
         run: |
-          digest=$(cut -d' ' -f1 ml-engine/models/risk_cascade_v1.0.0.joblib.sha256)
+          digest=$(cut -d' ' -f1 ml-engine/models/risk_cascade_v1.1.0.joblib.sha256)
           docker run -d --name ml -e MODEL_SHA256="$digest" salesmesh-ml-engine:ci
           for i in $(seq 1 40); do
             health=$(docker inspect --format '{{.State.Health.Status}}' ml)

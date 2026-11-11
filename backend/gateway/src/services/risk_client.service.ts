@@ -191,7 +191,7 @@ export class ResilientRiskClient {
   private readonly COOLING_PERIOD_MS = 30000;
   private readonly ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://localhost:8001';
   private readonly ML_TIMEOUT_MS = parseInt(process.env.ML_TIMEOUT_MS || '500', 10);
-  private readonly MODEL_VERSION = process.env.MODEL_VERSION || 'v1.0.0';
+  private readonly MODEL_VERSION = process.env.MODEL_VERSION || 'v1.1.0';
 
   /**
    * Evaluates a transaction's risk profile against the ML service (raw mode).
