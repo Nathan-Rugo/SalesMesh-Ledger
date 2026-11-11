@@ -29,7 +29,10 @@
     "ufaa:remit": "node dist/scripts/ufaa-remit.js",
     "ledger:init": "node dist/scripts/ledger-init.js",
     "ledger:requeue": "node dist/scripts/ledger-requeue.js",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "test:resilience": "jest --config jest.config.js --runInBand tests/integration/resilience tests/support",
+    "load:webhooks": "tsx tests/load/webhook-load.ts",
+    "load:stuffing": "tsx tests/load/stuffing-e2e.ts"
   },
   "dependencies": {
     "@grpc/grpc-js": "1.14.6",
