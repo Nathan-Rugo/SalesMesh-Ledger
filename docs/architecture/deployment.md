@@ -12,7 +12,7 @@ Caddy gets a Let's Encrypt certificate for `<elastic-ip>.sslip.io` (sslip.io res
 | `infra/docker-compose.yml` | App stack. It works on its own with `FABRIC_ENABLED=false` (`make up`). |
 | `infra/docker-compose.fabric.yml` | Overlay: the gateway joins the external `salesmesh_fabric` network and mounts the merchant org read-only (`make deploy-*`). |
 | `infra/caddy/Caddyfile` | One origin, automatic TLS, HTTP→HTTPS redirect. |
-| `infra/scripts/deploy/bootstrap_vm.sh` | Fresh VM: Docker + compose plugin, Node 22, 4 GB swap, docker group, clone. |
+| `infra/scripts/deploy/bootstrap_vm.sh` | Fresh VM: Docker + compose plugin, Node 24, 4 GB swap, docker group, clone. |
 | `infra/scripts/deploy/gen_env.sh` | Writes the root `.env` (mode 600) with random secrets and the sslip host. Refuses an existing `.env` unless `--force` (re-host / refresh: keeps every secret, makes a backup). |
 | `infra/scripts/deploy/smoke.sh` | Post-deploy check through Caddy. Prints `SMOKE PASS`. |
 
