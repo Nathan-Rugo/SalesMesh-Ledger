@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Nathan-Rugo/SalesMesh-Ledger/main/infra/scripts/deploy/bootstrap_vm.sh | bash
 #   # or, from a checkout: bash infra/scripts/deploy/bootstrap_vm.sh
 #
-# Installs Docker Engine + the compose plugin (Docker's apt repo), Node 22 (the gateway / PWA test
+# Installs Docker Engine + the compose plugin (Docker's apt repo), Node 24 (the gateway / PWA test
 # suites and the ledger e2e run on the host), git, make and openssl; adds a 4 GB swap file; puts the
 # user in the docker group; clones REPO_URL (branch BRANCH) into DIR unless it is there already.
 set -euo pipefail
@@ -46,11 +46,12 @@ if ! id -nG "$USER" | tr ' ' '\n' | grep -qx docker; then
   log "added $USER to the docker group: log out and back in (or run 'newgrp docker')"
 fi
 
-if ! command -v node >/dev/null || (( $(node -p 'process.versions.node.split(".")[0]') < 22 )); then
-  log "installing Node 22 (NodeSource apt repo)"
+if ! command -v node >/dev/null || (( $(node -p 'process.versions.node.split(".")[0]') < 24 )); then
+  # 24, not 22: Jest loads the ESM-only @noble/curves (via fabric-gateway) only on Node >= 24.9.
+  log "installing Node 24 (NodeSource apt repo)"
   sudo curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.asc
   sudo chmod a+r /etc/apt/keyrings/nodesource.asc
-  echo "deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_22.x nodistro main" |
+  echo "deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_24.x nodistro main" |
     sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null
   sudo apt-get update -qq && sudo apt-get install -y -qq nodejs
 fi
