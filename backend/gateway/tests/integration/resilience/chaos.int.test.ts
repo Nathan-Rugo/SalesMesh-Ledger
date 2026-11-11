@@ -83,6 +83,14 @@ describeStack('resilience: chaos via TCP fault proxy (real Postgres + Redis)', (
     const items: string[] = await s.mods.redisClient.lrange(s.mods.SPOOL_KEY, 0, -1);
     return new Set(items.map((i) => JSON.parse(i).receipt).filter((r: string) => rs.includes(r)));
   };
+  /** Redis db 0 is shared with other test files, so leftover entries can sit ahead of ours and
+   *  drainSpool takes one batch per call: keep draining until none of these receipts remain. */
+  const drainSpoolOf = async (rs: string[]) => {
+    const w = worker();
+    for (let i = 0; i < 50 && (await spooled(rs)).size > 0; i++) {
+      await w.drainSpool(); // parked entries count as 0 moved, so no early exit on 0
+    }
+  };
   const redisReady = async () => {
     for (let i = 0; i < 100 && s.mods.redisClient.status !== 'ready'; i++) await sleep(100);
     expect(s.mods.redisClient.status).toBe('ready');
@@ -118,7 +126,7 @@ describeStack('resilience: chaos via TCP fault proxy (real Postgres + Redis)', (
     const retries = await Promise.all(rs.map((r) => deliverUntilAck(() => send(r))));
     expect(retries.map((r) => r.at(-1))).toEqual(rs.map(() => 200));
     // The spool drain and the Daraja retry both deliver: ON CONFLICT keeps one row.
-    await worker().drainSpool();
+    await drainSpoolOf(rs);
     expect(await spooled(rs)).toEqual(new Set());
     expect(await intakeRows()).toBe(5);
     await drain();
@@ -138,7 +146,7 @@ describeStack('resilience: chaos via TCP fault proxy (real Postgres + Redis)', (
     await sleep(DEADLINE_MS * 6); // a 503'd insert may still commit late: the retry must cope
     const retries = await Promise.all(rs.map((r) => deliverUntilAck(() => send(r))));
     expect(retries.map((r) => r.at(-1))).toEqual(rs.map(() => 200));
-    await worker().drainSpool();
+    await drainSpoolOf(rs);
     await drain();
     await expectExactlyOnce(rs);
   });
@@ -157,7 +165,7 @@ describeStack('resilience: chaos via TCP fault proxy (real Postgres + Redis)', (
     expect(seen.flat().filter((x) => x !== 200 && x !== 503 && x !== 0)).toEqual([]);
     expect(seen.map((r) => r.at(-1))).toEqual(rs.map(() => 200));
     expect(seen.flat().some((x) => x === 503 || x === 0)).toBe(true);
-    await worker().drainSpool();
+    await drainSpoolOf(rs);
     await drain();
     await expectExactlyOnce(rs);
   });
