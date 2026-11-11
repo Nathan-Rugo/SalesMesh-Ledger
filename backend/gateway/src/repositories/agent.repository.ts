@@ -117,3 +117,37 @@ export async function consumeStkRequest(db: Db, stkRequestId: string, receipt: s
   );
   return rowCount === 1;
 }
+
+export interface AgentDirectoryRow {
+  agentCode: string | null;
+  fullName: string;
+  msisdn: string;
+  activated: boolean;
+  disabled: boolean;
+  /** The agent's ACTIVE payout destination, else the in-flight one; null when none. */
+  payout: { status: string; msisdn: string } | null;
+}
+
+/** Every SALES_AGENT (the schema is single-merchant), by agent code. Activated = PIN set past the one-time PIN. */
+export async function listAgentDirectory(db: Db): Promise<AgentDirectoryRow[]> {
+  const { rows } = await db.query(
+    `SELECT a.agent_code, u.full_name, u.phone_number, u.disabled_at IS NOT NULL AS disabled,
+            COALESCE(NOT c.must_change, FALSE) AS activated, d.status AS dest_status, d.msisdn AS dest_msisdn
+       FROM sales_agents a
+       JOIN users u ON u.user_id = a.user_id AND u.role = 'SALES_AGENT'
+       LEFT JOIN user_credentials c ON c.user_id = u.user_id
+       LEFT JOIN LATERAL (
+         SELECT status, msisdn FROM payout_destinations
+          WHERE agent_id = a.agent_id AND status IN ('ACTIVE', 'PENDING_VERIFICATION', 'COOLING_OFF')
+          ORDER BY (status = 'ACTIVE') DESC, created_at DESC LIMIT 1) d ON TRUE
+      ORDER BY a.agent_code NULLS LAST, u.full_name`
+  );
+  return rows.map((r) => ({
+    agentCode: r.agent_code,
+    fullName: r.full_name,
+    msisdn: r.phone_number,
+    activated: r.activated,
+    disabled: r.disabled,
+    payout: r.dest_status ? { status: r.dest_status, msisdn: r.dest_msisdn } : null,
+  }));
+}
