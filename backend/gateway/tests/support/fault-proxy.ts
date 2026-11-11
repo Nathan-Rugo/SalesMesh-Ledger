@@ -43,7 +43,7 @@ export async function startFaultProxy(targetHost: string, targetPort: number): P
     });
     from.on('end', () => (delayMs > 0 ? setTimeout(() => to.end(), delayMs) : to.end()));
     from.on('error', () => to.destroy());
-    from.on('close', () => to.destroy());
+    from.on('close', () => (delayMs > 0 ? setTimeout(() => to.destroy(), delayMs) : to.destroy()));
   };
 
   const server = net.createServer((client) => {

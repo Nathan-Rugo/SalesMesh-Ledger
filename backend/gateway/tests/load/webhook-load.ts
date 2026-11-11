@@ -10,6 +10,9 @@
  *
  * PASS when, over the measured window: p95 ≤ 200 ms, 0 non-2xx (timeouts count), 0 ACKed receipts
  * missing from mpesa_callbacks (when DATABASE_URL is set) and the generator kept ≥ 95% of the rate.
+ * With DATABASE_URL the --agent-code agent is seeded first (idempotently), so rows settle on the
+ * known-agent path; without it the code may be unknown and the worker parks rows UNRESOLVED (the
+ * hot path itself is the same: the agent is resolved after the ACK). The JSON records which.
  * Exit 0 PASS, 1 FAIL, 2 ABORT (target unreachable).
  */
 
@@ -18,7 +21,7 @@ import http from 'http';
 import https from 'https';
 import { Client } from 'pg';
 import { summarise, rate as ciRate } from '../support/stats';
-import { c2bBody, environment, EXIT, flags, num, request, sleep, writeResult } from './common';
+import { c2bBody, count, environment, EXIT, flags, num, pos, request, sleep, writeResult } from './common';
 
 const SLA_P95_MS = 200; // NFR-01
 const MIN_RATE_FRACTION = 0.95;
@@ -44,12 +47,12 @@ async function main(): Promise<number> {
     'timeout-ms': '2000',
   });
   const config = {
-    rate: num(f.rate, 'rate'),
-    duration_s: num(f.duration, 'duration'),
+    rate: count(f.rate, 'rate'),
+    duration_s: count(f.duration, 'duration'),
     warmup_s: num(f.warmup, 'warmup'),
     base_url: f['base-url'].replace(/\/+$/, ''),
     agent_code: f['agent-code'],
-    timeout_ms: num(f['timeout-ms'], 'timeout-ms'),
+    timeout_ms: pos(f['timeout-ms'], 'timeout-ms'),
     db_verification: Boolean(process.env.DATABASE_URL),
     thresholds: { p95_ms: SLA_P95_MS, non_2xx: 0, lost_receipts: 0, min_rate_fraction: MIN_RATE_FRACTION },
   };
@@ -61,10 +64,19 @@ async function main(): Promise<number> {
     return EXIT[verdict];
   };
 
-  if (config.rate <= 0 || config.duration_s <= 0) return finish('ABORT', { reason: '--rate and --duration must be > 0' });
   if (!f.token) return finish('ABORT', { reason: 'MPESA_CALLBACK_TOKEN (or --token) is required' });
   const live = await request(`${config.base_url}/health/live`, { timeoutMs: 3_000 });
   if (live.status !== 200) return finish('ABORT', { reason: `gateway not reachable at ${config.base_url} (${live.error ?? live.status})` });
+
+  let agentSeeded = false;
+  if (process.env.DATABASE_URL) {
+    try {
+      agentSeeded = await seedAgent(process.env.DATABASE_URL, config.agent_code);
+    } catch (e) {
+      return finish('ABORT', { reason: `DATABASE_URL set but seeding --agent-code failed: ${(e as Error).message}` });
+    }
+  }
+  Object.assign(config, { agent_path: agentSeeded ? 'known agent (seeded)' : 'not seeded: unknown-agent (UNRESOLVED) path after the ACK' });
 
   const url = `${config.base_url}/api/v1/mpesa/callback/${encodeURIComponent(f.token)}`;
   const agent = new (url.startsWith('https:') ? https.Agent : http.Agent)({ keepAlive: true, maxSockets: 2_048 });
@@ -104,16 +116,20 @@ async function main(): Promise<number> {
   const errors: Record<string, number> = {};
   for (const s of non2xx) errors[s.error ?? `HTTP ${s.status}`] = (errors[s.error ?? `HTTP ${s.status}`] ?? 0) + 1;
 
+  // Every SENT receipt is checked: lost = ACKed without a row; rows for non-ACKed sends are reported apart.
   let lost: number | null = null;
   let verifiedRows: number | null = null;
+  let nonAckedWithRow: number | null = null;
   const acked = samples.filter((s) => s.status === 200).map((s) => s.receipt);
   if (process.env.DATABASE_URL) {
     const db = new Client({ connectionString: process.env.DATABASE_URL });
     try {
       await db.connect();
-      const { rows } = await db.query(`SELECT count(*)::int AS n FROM mpesa_callbacks WHERE mpesa_receipt_id = ANY($1::text[])`, [acked]);
-      verifiedRows = rows[0].n;
-      lost = acked.length - rows[0].n;
+      const { rows } = await db.query(`SELECT mpesa_receipt_id AS r FROM mpesa_callbacks WHERE mpesa_receipt_id = ANY($1::text[])`, [samples.map((s) => s.receipt)]);
+      const found = new Set(rows.map((x) => x.r as string));
+      verifiedRows = found.size;
+      lost = acked.filter((r) => !found.has(r)).length;
+      nonAckedWithRow = samples.filter((s) => s.status !== 200 && found.has(s.receipt)).length;
     } catch (e) {
       return finish('ABORT', { reason: `DATABASE_URL set but verification failed: ${(e as Error).message}` });
     } finally {
@@ -134,7 +150,8 @@ async function main(): Promise<number> {
     over_sla: ciRate(latency.filter((l) => l > SLA_P95_MS).length, measured.length),
     errors,
     acked_receipts_all: acked.length,
-    intake_rows_found: verifiedRows,
+    intake_rows_found_for_sent: verifiedRows,
+    non_acked_with_row: nonAckedWithRow,
     lost_receipts: lost,
   };
   const failures: string[] = [];
@@ -150,10 +167,32 @@ async function main(): Promise<number> {
   return finish(failures.length ? 'FAIL' : 'PASS', { metrics, failures });
 }
 
-main().then(
-  (code) => process.exit(code),
-  (e) => {
-    console.error(`ABORT: ${(e as Error).message}`);
-    process.exit(EXIT.ABORT);
+/** Seeds user + outlet + agent for `code` unless it exists; true once the agent is on file. */
+async function seedAgent(connectionString: string, code: string): Promise<boolean> {
+  const db = new Client({ connectionString });
+  await db.connect();
+  try {
+    const { rowCount } = await db.query(`SELECT 1 FROM sales_agents WHERE agent_code = $1`, [code]);
+    if (rowCount) return true;
+    const phone = `2547${String(crypto.randomInt(0, 1e8)).padStart(8, '0')}`;
+    const { rows: [u] } = await db.query(`INSERT INTO users (full_name, phone_number, role) VALUES ('Load Test', $1, 'SALES_AGENT') RETURNING user_id`, [phone]);
+    const { rows: [o] } = await db.query(
+      `INSERT INTO retail_outlets (outlet_code, region, monthly_baseline) VALUES ($1, 'Nairobi', 100000) RETURNING outlet_id`,
+      [`OUT-${code}-${crypto.randomBytes(3).toString('hex')}`]
+    );
+    await db.query(`INSERT INTO sales_agents (user_id, outlet_id, agent_code) VALUES ($1, $2, $3)`, [u.user_id, o.outlet_id, code]);
+    return true;
+  } finally {
+    await db.end().catch(() => undefined);
   }
-);
+}
+
+if (require.main === module) {
+  main().then(
+    (code) => process.exit(code),
+    (e) => {
+      console.error(`ABORT: ${(e as Error).message}`);
+      process.exit(EXIT.ABORT);
+    }
+  );
+}

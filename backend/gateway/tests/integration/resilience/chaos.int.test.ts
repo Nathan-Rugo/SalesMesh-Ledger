@@ -26,6 +26,10 @@ describeStack('resilience: chaos via TCP fault proxy (real Postgres + Redis)', (
     quiet();
     s = await startStack('sm_chaos', { HOT_PATH_DEADLINE_MS: String(DEADLINE_MS) });
     await seedAgent(s.db.pool, 'AGCHAOS');
+    // Warm the hot pool: cold connects (SCRAM auth via the proxy) alone can exceed the 150 ms deadline.
+    for (let i = 0; i < 50 && s.mods.hotPool.idleCount < 10; i++) {
+      await Promise.allSettled(Array.from({ length: 10 }, () => s.mods.hotPool.query('SELECT 1')));
+    }
     // A real HTTP ml-engine stand-in (CLEAR for everything), reached through its own proxy.
     ml = http.createServer((req, res) => {
       let body = '';
@@ -86,6 +90,7 @@ describeStack('resilience: chaos via TCP fault proxy (real Postgres + Redis)', (
 
   it('Redis cut: deliveries still ACK via Postgres (claim unverified), duplicates still dedup; after restore nothing is duplicated', async () => {
     const rs = receipts(10);
+    (console.error as jest.Mock).mockClear(); // only this test's calls count
     s.redis.cut();
     const first = await Promise.all(rs.map(send));
     const again = await Promise.all(rs.map(send)); // Daraja redelivers while Redis is still down
@@ -148,9 +153,10 @@ describeStack('resilience: chaos via TCP fault proxy (real Postgres + Redis)', (
     s.pg.restore();
 
     expect(s.pg.stats().dropped).toBeGreaterThan(before);
-    expect(seen.flat().filter((x) => x !== 200 && x !== 503)).toEqual([]);
+    // 0 = the proxy reset the socket itself (transport error): Daraja retries that like a 503.
+    expect(seen.flat().filter((x) => x !== 200 && x !== 503 && x !== 0)).toEqual([]);
     expect(seen.map((r) => r.at(-1))).toEqual(rs.map(() => 200));
-    expect(seen.flat()).toContain(503);
+    expect(seen.flat().some((x) => x === 503 || x === 0)).toBe(true);
     await worker().drainSpool();
     await drain();
     await expectExactlyOnce(rs);

@@ -17,7 +17,7 @@
 import crypto from 'crypto';
 import { Client } from 'pg';
 import { rate as ciRate } from '../support/stats';
-import { c2bBody, environment, EXIT, flags, msisdn, num, request, rng, sleep, writeResult } from './common';
+import { c2bBody, count, environment, EXIT, flags, msisdn, num, pos, request, rng, sleep, writeResult } from './common';
 
 const RECALL_CI_LOW_MIN = 0.9;
 // ml-engine/reports/metrics.json (offline, test split): stuffing event recall 84/84, CI-low 0.957.
@@ -84,10 +84,10 @@ async function main(): Promise<number> {
     'settle-timeout-s': '1800',
   });
   const config = {
-    events: num(f.events, 'events'),
-    agents: Math.max(1, num(f.agents, 'agents')),
+    events: count(f.events, 'events'),
+    agents: count(f.agents, 'agents'),
     benign_per_agent: num(f['benign-per-agent'], 'benign-per-agent'),
-    theta: num(f.theta, 'theta'),
+    theta: pos(f.theta, 'theta'),
     seed: num(f.seed, 'seed'),
     base_url: f['base-url'].replace(/\/+$/, ''),
     ml_url: f['ml-url'].replace(/\/+$/, ''),
@@ -102,6 +102,14 @@ async function main(): Promise<number> {
     console.log(`${verdict}${extra.reason ? ` (${extra.reason})` : ''} — results: ${writeResult('stuffing', result)}`);
     return EXIT[verdict];
   };
+
+  // Inputs that would hang the anchor draw or overlap one agent's 20-minute windows.
+  // Splits need A/k >= 100 with A > theta, k <= 7, so theta >= 700; above 50000 the anchor tail is empty.
+  const perAgent = Math.ceil(config.events / config.agents);
+  const slotMs = (19 * 86_400_000) / perAgent;
+  if (config.theta < 700 || config.theta > 50_000) return finish('ABORT', { reason: `--theta ${config.theta} outside [700, 50000]` });
+  if (slotMs <= 2 * config.window_minutes * 60_000)
+    return finish('ABORT', { reason: `${perAgent} events per agent overlap their ${config.window_minutes}-minute windows; raise --agents` });
 
   // Preflight: every dependency must be reachable, or the run aborts (never a pass by default).
   if (!process.env.DATABASE_URL) return finish('ABORT', { reason: 'DATABASE_URL is required' });
@@ -122,9 +130,12 @@ async function main(): Promise<number> {
     const runId = crypto.randomBytes(3).toString('hex').toUpperCase();
     const now = Date.now();
     const day = 86_400_000;
+    // Phones mix in runId: users.phone_number is UNIQUE, so a rerun with the same seed must differ.
+    const agentPhone = (i: number) =>
+      `2547${String(parseInt(crypto.createHash('sha256').update(`${runId}:${i}`).digest('hex').slice(0, 12), 16) % 1e8).padStart(8, '0')}`;
     const codes = Array.from({ length: config.agents }, (_, i) => `SE${runId}${i}`);
-    for (const code of codes) {
-      const { rows: [u] } = await db.query(`INSERT INTO users (full_name, phone_number, role) VALUES ('Stuffing E2E', $1, 'SALES_AGENT') RETURNING user_id`, [msisdn(r)]);
+    for (const [i, code] of codes.entries()) {
+      const { rows: [u] } = await db.query(`INSERT INTO users (full_name, phone_number, role) VALUES ('Stuffing E2E', $1, 'SALES_AGENT') RETURNING user_id`, [agentPhone(i)]);
       const { rows: [o] } = await db.query(
         `INSERT INTO retail_outlets (outlet_code, region, monthly_baseline) VALUES ($1, 'Nairobi', 100000) RETURNING outlet_id`,
         [`OUT-${code}`]
@@ -145,12 +156,11 @@ async function main(): Promise<number> {
     for (let e = 0; e < config.events; e++) {
       const code = codes[e % codes.length];
       const slot = Math.floor(e / codes.length);
-      const perAgent = Math.ceil(config.events / codes.length);
-      const slotMs = (19 * day) / perAgent; // events of one agent never overlap
       const anchorAt = now - 20 * day + slot * slotMs + r() * (slotMs - config.window_minutes * 60_000);
-      let total: number;
-      do total = lognormal(r, 1500, 0.9);
-      while (!(total > config.theta && total <= maxAnchor));
+      let total = NaN;
+      for (let t = 0; t < 100_000 && !(total > config.theta && total <= maxAnchor); t++) total = lognormal(r, 1500, 0.9);
+      // shortcut: uniform fallback when the log-normal tail is too thin for rejection (extreme theta).
+      if (!(total > config.theta && total <= maxAnchor)) total = config.theta + r() * (maxAnchor - config.theta);
       total = +total.toFixed(2);
       const kLo = Math.max(3, Math.ceil(total / (0.97 * config.theta)));
       const k = kLo + Math.floor(r() * (config.k_max - kLo + 1));
