@@ -63,7 +63,7 @@ MPESA_CALLBACK_TOKEN=... DATABASE_URL=postgres://... \
   npm run load:stuffing -- --events 120 --agents 24 --base-url http://localhost:4000 --ml-url http://localhost:8000
 ```
 
-`infra/docker-compose.yml` publishes only Caddy, so the gateway (:4000), ml-engine (:8000) and Postgres aren't reachable from the host as written. Run tier 2 against an environment where they are, for example with a local compose override that publishes those ports, or from the EC2 host. Don't run the stuffing script against a database with real agents: it seeds its own `SE<run>` agents.
+`infra/docker-compose.yml` publishes only Caddy, so the gateway (:4000), ml-engine (:8000) and Postgres aren't reachable from the host as written. Run tier 2 against an environment where they are: `infra/docker-compose.bench.yml` starts a throwaway copy of the stack beside the live one, with gateway :14000, ml-engine :18000 and Postgres :15432 on 127.0.0.1 (usage in the file's header). Don't run the stuffing script against a database with real agents: it seeds its own `SE<run>` agents.
 
 **Load generator.** Request *i* is due at t0 + *i*/rate, whatever the earlier requests are doing. Latency is measured from that intended time, so a stalled gateway can't hide its queueing (no coordinated omission). The JSON also reports service time and generator lag separately. PASS requires all of:
 
@@ -89,10 +89,12 @@ An event counts as detected when any split got a non-CLEAR INITIAL decision, the
 |---|---|---|
 | Tier 1, CI | GitHub Actions, Postgres 16 + Redis 7 services | PASS: `test` job green on PR #66 ([run 42987709489](https://github.com/Nathan-Rugo/SalesMesh-Ledger/actions/runs/42987709489)) |
 | Tier 1, local (2026-11-11) | Ryzen 5 5625U, 12 threads, 7.35 GB RAM, Node 24, Docker Postgres 16 + Redis 7 | PASS: duplicates 3/3 (twice in a row), chaos 5/5, fuliza 1/1, `stats.test.ts` 14/14. Full gateway suite 711 passed, 2 skipped (ledger e2e needs Fabric) |
-| Load 200 req/s, 60 s, local compose | Pending | Record it honestly even if it falls below 200/s |
-| Load 200 req/s, 60 s, EC2 (pass of record) | Pending, after the AWS runbook | — |
-| Stuffing e2e (≥100 events) | Pending, needs the ml-engine reachable | Compare against the offline 84/84 (CI-low 0.957) |
+| Load 200 req/s, 60 s, local compose | Not run: the laptop (7.35 GB) can't hold the stack beside Docker reliably. EC2 is the pass of record | — |
+| **Load 200 req/s, 60 s + 10 s warm-up, EC2 (pass of record), 2026-11-11, run A3C9DB** | m7i-flex.large (Xeon Platinum 8488C, 2 vCPU, 7.6 GB), Node 24.22, bench stack beside the live one, generator on the same host, known-agent path | **PASS.** 12,000 measured at 200.0/s: p50 3.5 ms, **p95 16.3 ms**, p99 33.9 ms, max 115.9 ms (from intended send time). Non-2xx 0/12,000 (95% CI 0–0.031%). Over-SLA 0/12,000. Lost receipts 0; all 14,000 sent receipts have exactly their intake row |
+| **Stuffing e2e, EC2, 2026-11-11, run DF9AC4** | Same host, real ml-engine | **PASS.** Event recall **120/120 (95% CI 0.970–1.000)**, threshold CI-low ≥ 0.90. Split recall 480/601 (0.799, CI 0.764–0.830). Benign FPR 0/960 (CI 0–0.38%). No fail-safe scores (ml-engine warmed with a 3-event run first). Offline baseline: 84/84, CI-low 0.957 |
 | Tier 2 smoke | Local, targets unreachable | Both scripts ABORT with exit 2 and write their JSON, as required. The load script against a local 200-OK stub at 100/s reached 99.7/s, PASS |
+
+EC2 runs used `infra/docker-compose.bench.yml`: a separate compose project (`salesmesh-bench`) with its own empty Postgres and Redis, ports on 127.0.0.1 only, Fabric and payouts off. It was torn down with `down -v` afterwards, so no test rows reached the live database. The load generator ran on the gateway's host, so the figures exclude internet latency to Safaricom; they measure the gateway's ingestion path, which is what NFR-01 bounds.
 
 ## Defects found
 
