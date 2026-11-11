@@ -6,6 +6,7 @@ profile-driven synthetic backbone (hour shares, determinism, anchor supply).
 """
 
 import hashlib
+import json
 import os
 import sys
 
@@ -17,7 +18,7 @@ import pandas as pd
 import pytest
 
 import generate_dataset
-from engine.base_traffic import generate_synthetic_base_traffic
+from engine.base_traffic import generate_synthetic_base_traffic, load_paysim_as_base_traffic
 from engine.paysim_profile import fit_profile, load_profile
 from engine.paysim_profile import main as profile_main
 
@@ -70,7 +71,12 @@ def test_isfraud_never_changes_the_fit(tmp_path):
     lambda df: df.assign(amount="abc"),
     lambda df: df.assign(step=df["step"].astype(float) + 0.5),
     lambda df: df.assign(step=0),
-])
+    lambda df: df.assign(step=10_001),  # corrupt huge step would build a giant day range
+    lambda df: df.assign(type="TRANSFER"),  # no PAYMENT / CASH_IN rows
+    lambda df: df.iloc[0:0],  # header only
+    lambda df: df[df["step"] <= 24],  # one busy day -> CV 0
+], ids=["no-step", "text-amount", "fractional-step", "step-0", "huge-step", "no-used-types", "header-only",
+        "one-busy-day"])
 def test_garbled_input_errors_and_writes_nothing(tmp_path, mutate):
     raw = _fake_paysim(tmp_path / "ok.csv")
     mutate(raw).to_csv(tmp_path / "bad.csv", index=False)
@@ -129,3 +135,79 @@ def test_profile_backbone_has_enough_stuffing_anchors(n_agents, n_days, seed, ne
     theta = 5000.0
     anchors = ((base["amount"] > theta) & (base["amount"] <= 7 * 0.97 * theta)).sum()
     assert anchors >= needed
+
+
+def test_committed_profile_records_cv_interval():
+    lo, hi = PROFILE["day_multiplier_cv_ci95"]
+    assert 0 < lo < PROFILE["day_multiplier_cv"] < hi
+
+
+def _write_profile(path, **overrides):
+    p = {"hour_weights": PROFILE["hour_weights"], "day_multiplier_cv": PROFILE["day_multiplier_cv"], **overrides}
+    path.write_text(json.dumps(p), encoding="utf-8")
+    return path
+
+
+BAD_PROFILES = {
+    "cv-zero": {"day_multiplier_cv": 0.0},
+    "cv-nan": {"day_multiplier_cv": float("nan")},
+    "short-weights": {"hour_weights": [1 / 23] * 23},
+    "negative-weight": {"hour_weights": [-0.1, 0.1 + 1 / 24] + [1 / 24] * 22},
+    "nan-weight": {"hour_weights": [float("nan")] + [1 / 24] * 23},
+    "not-normalised": {"hour_weights": [0.05] * 24},
+    "missing-key": {"hour_weights": None},
+}
+
+
+@pytest.mark.parametrize("name", list(BAD_PROFILES))
+def test_bad_profile_is_rejected_at_load_and_by_the_cli(tmp_path, name):
+    over = BAD_PROFILES[name]
+    path = tmp_path / "p.json"
+    if name == "missing-key":
+        path.write_text(json.dumps({"day_multiplier_cv": 0.1}), encoding="utf-8")
+    else:
+        _write_profile(path, **over)
+    with pytest.raises(ValueError, match="PaySim profile"):
+        load_profile(str(path))
+    with pytest.raises(SystemExit) as exc:
+        generate_dataset.main(["--profile", str(path), "--output", str(tmp_path / "x.csv"), "--quiet"])
+    assert exc.value.code not in (0, None) and not (tmp_path / "x.csv").exists()
+
+
+def test_bad_profile_dict_is_rejected_by_the_generator():
+    with pytest.raises(ValueError, match="day_multiplier_cv"):
+        generate_synthetic_base_traffic(n_agents=2, n_days=1, profile={**PROFILE, "day_multiplier_cv": 0})
+
+
+def test_malformed_profile_json_exits_cleanly(tmp_path):
+    path = tmp_path / "p.json"
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        load_profile(str(path))
+    with pytest.raises(SystemExit) as exc:
+        generate_dataset.main(["--profile", str(path), "--output", str(tmp_path / "x.csv"), "--quiet"])
+    assert exc.value.code not in (0, None)
+
+
+def test_replay_maps_step_1_to_midnight_and_scales_amounts(tmp_path):
+    raw = _fake_paysim(tmp_path / "ps.csv")
+    out = load_paysim_as_base_traffic(str(tmp_path / "ps.csv"), currency_scale=0.5, start_date="2026-01-01")
+    first = raw[raw["step"] == 1].iloc[0]
+    row = out[out["counterparty_id"].eq(first["nameDest"]) & out["amount"].eq(round(first["amount"] * 0.5, 2))]
+    assert not row.empty and (row["timestamp"] == pd.Timestamp("2026-01-01 00:00")).all()
+    assert out["timestamp"].min() == pd.Timestamp("2026-01-01 00:00")
+    assert len(out) == len(raw)  # replay keeps all four types (reference only)
+
+
+@pytest.mark.parametrize("argv", [
+    ["--currency-scale", "0.1"],  # replay-only flag without --paysim-path
+    ["--paysim-path", "x.csv", "--currency-scale", "0"],
+    ["--paysim-path", "x.csv", "--currency-scale", "-1"],
+    ["--paysim-path", "x.csv", "--currency-scale", "nan"],
+    ["--paysim-path", "x.csv", "--currency-scale", "inf"],
+    ["--paysim-path", "x.csv", "--profile", "p.json"],  # profile would be silently ignored
+])
+def test_cli_rejects_invalid_flag_combinations(argv):
+    with pytest.raises(SystemExit) as exc:
+        generate_dataset.parse_args(argv)
+    assert exc.value.code == 2

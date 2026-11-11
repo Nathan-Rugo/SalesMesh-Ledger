@@ -20,10 +20,13 @@ The model was retrained and shipped as `risk_cascade_v1.1.0`.
     that flipping `isFraud` leaves the fit unchanged.
 - **Rows used:** `type ∈ {PAYMENT, CASH_IN}`, with no other filter: 3,550,779 rows.
 - **Step → time:** step *s* covers hours [s−1, s), so hour = (s−1) mod 24 and day = ⌊(s−1)/24⌋.
+  - PaySim documents a step as one hour but not the clock time of step 1, so step 1 = 00:00 is an assumption. It is
+    supported by the data: the 07:00 → 08:00 jump in the hour weights (0.46% → 4.56%) matches a business day opening.
+    A phase shift of an hour or so cannot be ruled out, and it is a known assumption of this fit.
   - The replay loader `load_paysim_as_base_traffic` now uses the same (s−1) offset.
   - Before this change, it was one hour late.
 - **Output:** `data/paysim_profile.json`, written with `sort_keys` and `indent=2`. It holds:
-  - the hour weights and the busy-day CV;
+  - the hour weights, the busy-day CV and its bootstrap 95% interval;
   - the kept and dropped days, and the sensitivity CVs;
   - the amount quantiles and the row counts;
   - the source sha256, the mapping and the fit date.
@@ -38,13 +41,16 @@ missing, it exits non-zero and does not fall back to uniform timing. The profile
   - PaySim's PAYMENT + CASH_IN amount quantiles are recorded for reference only: P5 1,385, P25 7,204, median 19,193,
     P75 103,064, P95 318,214 and P99 473,237 (PaySim units).
   - `--currency-scale` (≈ 1500/19190) applies only to the PaySim replay path, which is reference-only and was not run here.
+    The 19,190 is the PAYMENT + CASH_IN median, but the replay keeps all four types (CASH_OUT and TRANSFER too), so
+    the scale only approximately maps the replayed median to KES 1,500.
 
 ## 2. Fitted hour-of-day profile
 
 The weights are pooled over all 31 days and normalised to sum to 1.
 - Hours 07:00–20:59 carry 90.9% of the weight.
-- PaySim's peak is 17:00–19:59.
-- Night hours (21:00–06:59) are rare, but none is empty.
+- The peak is 17:00–19:59 (27.1% of the weight).
+- Night (00:00–06:59) carries 1.1% of the weight, and no hour is empty. The late evening (21:00–23:59) still
+  carries 8.0%.
 
 | Hour | Rows | Weight |
 |---|---|---|
@@ -112,6 +118,11 @@ The day-to-day CV is a method-of-moments estimate over the kept-day totals: popu
 The CV does not change anywhere between 0.4 × and 0.6 × the maximum, because no day falls in that band: the totals
 jump from 32,959 to 198,242. With CV 0.113, the daily multiplier's central 95% range is 0.79–1.23.
 
+**Uncertainty.** The CV rests on only 14 days. A seeded percentile bootstrap over the kept days (10,000 resamples,
+seed 0; `day_multiplier_cv_ci95` in the profile) gives a 95% interval of **[0.041, 0.162]** around the point
+estimate 0.113. The interval is wide and skewed, because day 0 (318,702) sits well above the other 13 days.
+The generator uses the point estimate; the day-to-day volume variation is fitted only loosely.
+
 ## 4. Old vs new metrics
 
 Both runs use the same code, apart from the backbone, and the same commands:
@@ -176,9 +187,9 @@ The difference between v1.0.0 and v1.1.0 cannot be attributed to the calibration
 - **Moved cutoffs.** The split cutoffs come from `t_min` / `t_max`, and both moved: v1.0.0 started at 07:00 on day 1
   and ended near 21:00, while v1.1.0 covers whole days. The partitions are therefore different, with 104 test events
   instead of 120.
-- **Night-time context changed.** Under v1.0.0 the only night-time rows were slow-chain fraud, so activity at night
-  was a free tell. In v1.1.0, 7,461 benign rows fall outside 07:00–21:00, alongside 579 circular-chaining and 252
-  commission-stuffing rows.
+- **Off-hours context changed.** Under v1.0.0 the only rows outside the old 07:00–21:00 window were slow-chain fraud,
+  so off-hours activity was a free tell. In v1.1.0, 7,461 benign rows fall outside that window, alongside 579
+  circular-chaining and 252 commission-stuffing rows.
   - Timing is therefore a more realistic and harder signal in v1.1.0.
   - No feature uses the hour of day directly, but the inter-transaction gaps (velocity, entropy) change with the
     diurnal shape.
@@ -196,4 +207,6 @@ cd ml-engine
 .venv/Scripts/python train.py --model-version v1.1.0 --seed 42 --n-bootstrap 1000 --stability-repeats 5
 ```
 
-With the pinned `.venv`, the same seed and profile give a byte-identical dataset CSV (sha256 `928fa295…dcc22b`).
+On the pinned `.venv` on the same platform (Windows, Python 3.11.9, numpy 1.26.4, pandas 2.2.3), the same seed and
+profile gave a byte-identical dataset CSV (sha256 `928fa295…dcc22b`) on three runs. Other platforms or library
+versions may differ in the last bits of float formatting.

@@ -74,6 +74,8 @@ def generate_synthetic_base_traffic(
     agent_ids = [f"AGT{i:05d}" for i in range(n_agents)]
 
     if profile is not None:
+        from engine.paysim_profile import validate_profile  # lazy: `python -m engine.paysim_profile` would import itself twice
+        validate_profile(profile)
         hour_weights = np.asarray(profile["hour_weights"], dtype=float)
         cv2 = float(profile["day_multiplier_cv"]) ** 2
 

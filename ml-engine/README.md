@@ -250,7 +250,7 @@ equals `build_feature_matrix` on the same rows to within 1e-9, so the gateway ne
   "isolation_score": 0.6582,
   "xgb_probability": 0.9796,
   "model_version": "v1.1.0",
-  "model_sha256": "a1c88c6a7e02fedbea4c8758f07ec56894fad246afe07c9c39f8068243fd5abf",
+  "model_sha256": "a845a740864619621edf10e4047490802a7e8b676393a044b92abd3c17bdce5e",
   "decision": "QUARANTINE",
   "triggered_layer": 2,
   "layer2_adjudicated": true,
@@ -309,8 +309,11 @@ Full detail: `reports/evaluation_report.md` and `reports/metrics.json`. The v1.0
 
 **Backbone.** Base traffic is synthetic, with two parts fitted to PaySim1 (Lopez-Rojas et al., 2016) PAYMENT + CASH_IN rows:
 - **Hour of day:** each timestamp takes an hour drawn from PaySim's 24 pooled hour weights, plus a uniform offset
-  within that hour. Activity peaks at 17:00–19:00 and night hours are rare but non-zero.
-- **Day-to-day volume:** each day has a shared multiplier g ~ Gamma(mean 1, CV 0.113), the CV of PaySim's 14 busy days.
+  within that hour. The peak is 17:00–19:59; night (00:00–06:59) carries 1.1% of the weight and no hour is empty.
+  - PaySim step *s* is taken as hour (s−1), so step 1 = 00:00. This is an assumption, supported by the 07:00 → 08:00
+    jump in the weights (0.46% → 4.56%), which matches a business day opening. A phase shift is a known limitation.
+- **Day-to-day volume:** each day has a shared multiplier g ~ Gamma(mean 1, CV 0.113), the CV of PaySim's 14 busy days
+  (bootstrap 95% interval [0.041, 0.162], so this part is fitted only loosely).
   Each agent-day count is Poisson(6·g).
 
 Amounts stay log-normal (median KES 1,500, σ 0.9).
@@ -371,7 +374,7 @@ The v1.0.0 numbers (uniform 07:00–21:00 backbone) were PR-AUC lift 0.7120 [0.6
 [0.8519, 0.8854] and FPR 0.13% [0.07%, 0.21%]. The difference is not caused by the calibration alone:
 - v1.1.0 is a fresh random draw.
 - The split cutoffs moved, because `t_min` / `t_max` moved.
-- Under v1.0.0 the only night-time rows were slow-chain fraud. Under v1.1.0, benign traffic also runs at night.
+- Under v1.0.0 the only rows outside 07:00–21:00 were slow-chain fraud. Under v1.1.0, benign traffic also runs off-hours.
 
 See `reports/paysim_calibration.md`.
 

@@ -9,12 +9,17 @@
     "0.99": 473237.1727999994
   },
   "busy_day_rule": "keep days with total >= 0.5 x the largest day's total",
+  "cv_ci_method": "percentile bootstrap over kept days, 10000 resamples, seed 0",
   "cv_estimator": "method of moments over kept-day totals: population std / mean",
   "cv_sensitivity": {
     "0.4": 0.1132316082671325,
     "0.6": 0.1132316082671325
   },
   "day_multiplier_cv": 0.1132316082671325,
+  "day_multiplier_cv_ci95": [
+    0.04112988562037267,
+    0.16150343264762868
+  ],
   "day_totals": [
     318702,
     249854,

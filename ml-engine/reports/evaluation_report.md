@@ -16,7 +16,7 @@ All intervals are 95% cluster-bootstrap CIs (1000 resamples of 106 agent compone
 ## 2. Data and Split
 
 - Dataset: 86,528 rows, 5,146 fraud rows, 900 fraud events (600 stuffing, 300 chaining).
-- Split seed 42: 300 agents in 260 components; 180 dev / 120 test agents. 5 events straddle a time cutoff; 1 validation events (4 rows) that also have rows in train were excluded from validation so the calibrator never sees a training event.
+- Split seed 42: 300 agents in 260 components; 180 dev / 120 test agents. 5 events straddle a time cutoff; 1 validation event (4 rows) with rows also in train was excluded from validation so the calibrator never sees a training event.
 
 | Partition | Agents | Window | Rows | Fraud rows | Fraud events |
 |---|---|---|---|---|---|

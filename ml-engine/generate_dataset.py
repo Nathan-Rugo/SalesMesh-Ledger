@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import math
 import os
 import sys
 
@@ -33,8 +34,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--paysim-path", default=None,
                    help="Replay a real PaySim CSV as the backbone (reference only; isFraud is never used).")
     p.add_argument("--currency-scale", type=float, default=None,
-                   help="PaySim amount multiplier, replay path only (~1500/19190 maps the median to KES 1,500).")
-    p.add_argument("--profile", default=DEFAULT_PROFILE, help="PaySim profile JSON for the synthetic backbone.")
+                   help="PaySim amount multiplier, replay path only. ~1500/19190 maps the PAYMENT + CASH_IN median "
+                        "to KES 1,500; the replay keeps all four types, so it is approximate (reference only).")
+    p.add_argument("--profile", default=None,
+                   help="PaySim profile JSON for the synthetic backbone (default data/paysim_profile.json).")
     p.add_argument("--output", default="salesmesh_fraud_dataset.csv")
     p.add_argument("--n-agents", type=int, default=300)
     p.add_argument("--n-days", type=int, default=45)
@@ -47,6 +50,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if args.currency_scale is not None and not args.paysim_path:
         p.error("--currency-scale applies only with --paysim-path")
+    if args.currency_scale is not None and not (math.isfinite(args.currency_scale) and args.currency_scale > 0):
+        p.error("--currency-scale must be a finite number > 0")
+    if args.profile is not None and args.paysim_path:
+        p.error("--profile applies only to the synthetic backbone, not with --paysim-path")
+    args.profile = args.profile or DEFAULT_PROFILE
     return args
 
 
@@ -61,8 +69,12 @@ def main(argv=None) -> None:
         if not os.path.isfile(args.profile):
             sys.exit(f"Error: PaySim profile not found: {args.profile} "
                      "(fit it with: python -m engine.paysim_profile <paysim.csv> --out data/paysim_profile.json)")
+        try:
+            profile = load_profile(args.profile)
+        except (ValueError, OSError) as exc:
+            sys.exit(f"Error: invalid PaySim profile {args.profile}: {exc}")
         base = generate_synthetic_base_traffic(n_agents=args.n_agents, n_days=args.n_days, seed=args.seed,
-                                               profile=load_profile(args.profile))
+                                               profile=profile)
     say(f"      {len(base):,} base rows")
 
     say(f"[2/4] Injecting {args.stuffing_sequences} commission-stuffing events (anchor replacement)...")

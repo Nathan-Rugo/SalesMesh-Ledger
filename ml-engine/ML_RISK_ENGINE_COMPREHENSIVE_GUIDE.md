@@ -18,7 +18,7 @@ In distributed mobile-money retail agent networks (e.g., M-Pesa, Safaricom Daraj
 Standard commercial anti-fraud engines (e.g., generic rules or basic classification) fail in this domain because:
 - **Static business rules** (e.g., flagging amounts $> \text{KES } 10,000$) create astronomical false positive rates ($> 6.5\%$) on legitimate high-value commerce while failing to detect stuffing, which intentionally stays below threshold ceilings.
 - **Off-the-shelf datasets (like PaySim)** model *account-takeover* (unauthorized draining of credentials), an entirely different fraud signature that teaches machine learning algorithms irrelevant features.
-- **Extreme Class Imbalance** ($\sim 1.3\%$ fraud rate) causes uncalibrated supervised models to output extreme, ungrounded confidence scores.
+- **Class Imbalance** (about 6% fraud rows in the `v1.1.0` dataset) causes uncalibrated supervised models to output extreme, ungrounded confidence scores.
 
 To solve this, **Module 2 implements a Two-Layer Risk Cascade**:
 An unsupervised **Isolation Forest** pre-filter ($<30\text{ ms}$) screens raw streaming transactions, rapidly clearing obvious benign traffic, while isolating candidate anomalies for a supervised, **isotonic-calibrated XGBoost classifier** equipped with **SHAP TreeExplainer** interpretability.
@@ -82,10 +82,10 @@ An unsupervised **Isolation Forest** pre-filter ($<30\text{ ms}$) screens raw st
 Examiners frequently ask: *"Why combine an unsupervised model with a supervised model instead of choosing just one?"*
 
 ### Problem 1: The Severe Class Imbalance Trap
-In retail transaction streams, fraudulent transactions represent only $\approx 1.3\%$ of traffic. If a supervised classifier (like XGBoost) is trained directly on the raw transaction stream, the extreme skew degrades minority-class gradient updates. Resampling techniques (such as SMOTE or random oversampling) distort the underlying distribution of retail behavior.
+In retail transaction streams, fraudulent transactions are a small minority ($\approx 6\%$ of rows in the `v1.1.0` dataset: 5,146 of 86,528; 6.4% of the training partition). If a supervised classifier (like XGBoost) is trained directly on the raw transaction stream, the skew degrades minority-class gradient updates. Resampling techniques (such as SMOTE or random oversampling) distort the underlying distribution of retail behavior.
 
 **Our Architectural Solution:**
-Layer 1 acts as a structural filter. Because the unsupervised Isolation Forest removes the vast majority of clearly benign transactions ($s < 0.45$), the **candidate anomaly cohort** presented to Layer 2 has a significantly higher concentration of fraud ($\approx 7.3\%$ vs. $1.3\%$). This reduces the effective class imbalance naturally by a factor of 5.6x before XGBoost begins training.
+Layer 1 acts as a structural filter. Because the unsupervised Isolation Forest removes most clearly benign transactions ($s < 0.45$), the **candidate anomaly cohort** presented to Layer 2 has a much higher concentration of fraud: in `v1.1.0` training, 1,502 of 5,193 candidate rows (28.9%) against 1,817 of 28,476 rows (6.4%) overall, about 4.5x denser before XGBoost begins training.
 
 ### Problem 2: The Online Latency Budget
 High-volume payment networks require rapid responses. Running complex tree ensemble traversals and computing SHAP attribution values on every transaction would saturate server CPU resources.
@@ -106,8 +106,8 @@ Training an algorithm on account takeover signals teaches it to look for account
 
 **Methodological Solution (Thesis Section 3.2.1):**
 1. **PaySim-Calibrated Background Traffic:** The base traffic is synthetic, but two of its properties are fitted to the real PaySim1 CSV (Lopez-Rojas et al., 2016; Kaggle `ealaxi/paysim1`, CC BY-SA 4.0) by a streamed profiler (`engine/paysim_profile.py`), and the fitted parameters are committed in `data/paysim_profile.json`. The fit uses PAYMENT + CASH_IN rows only; `isFraud` is never read.
-   - **Diurnal cycle:** 24 pooled hour-of-day weights. Activity peaks at 17:00–19:00, and night hours are rare but non-zero.
-   - **Day-to-day volume:** a shared daily multiplier g ~ Gamma(mean 1, CV 0.113), using the CV of PaySim's 14 busy days. The near-empty days are a PaySim scheduling artifact and are excluded.
+   - **Diurnal cycle:** 24 pooled hour-of-day weights. The peak is 17:00–19:59; night (00:00–06:59) carries 1.1% of the weight, and no hour is empty. PaySim step *s* is taken as hour (s−1), so step 1 = 00:00: an assumption supported by the 07:00 → 08:00 jump in the weights (0.46% → 4.56%), which matches a business day opening. A phase shift is a known limitation.
+   - **Day-to-day volume:** a shared daily multiplier g ~ Gamma(mean 1, CV 0.113), using the CV of PaySim's 14 busy days (bootstrap 95% interval [0.041, 0.162], so this part is fitted only loosely). The near-empty days are a PaySim scheduling artifact and are excluded.
 
    Amounts stay log-normal (median KES 1,500, σ 0.9). PaySim's amount quantiles are recorded for reference only. See `reports/paysim_calibration.md`.
 2. **Purpose-Built Synthetic Fraud Injectors:** A mathematically rigorous synthetic fraud injection engine (`engine/fraud_injector.py`) superimposes real-world commission fraud patterns directly on top of the traffic:
@@ -300,29 +300,32 @@ When the Node.js Gateway advances a `CLEAR` transaction to **Module 3 (Hyperledg
 | Question an Examiner Will Ask | Your Prepared Answer |
 |---|---|
 | *"Why didn't you just use PaySim's fraud column?"* | *"PaySim's `isFraud` represents account takeover (identity theft and account draining). Our capstone targets first-party agent collusion: commission stuffing and circular chaining. Training on PaySim's native labels would learn the wrong signatures. We fitted the base traffic's hour-of-day cycle and day-to-day volume variation to PaySim's PAYMENT and CASH_IN rows (never its labels), and injected mathematically defined ground truth matching Equations 3.1 and 3.2."* |
-| *"How did you handle the 1.3% class imbalance?"* | *"Architecturally, rather than through artificial synthetic sampling. The Layer 1 Isolation Forest acts as a pre-filter, stripping away over 80% of benign traffic. The candidate cohort passed to XGBoost has a 5.6x higher fraud density, which stabilizes boosting. We then tuned `scale_pos_weight` directly on this candidate subset."* |
-| *"What does 0.85 confidence actually mean?"* | *"On raw XGBoost, tree margin outputs are compressed and cannot be interpreted as probabilities. We applied non-parametric Isotonic Regression on held-out validation predictions to calibrate the margin into an empirical posterior probability $P(\text{Fraud} \mid x) \ge 0.85$. This dropped our Brier calibration score by 98%."* |
+| *"How did you handle the class imbalance?"* | *"Architecturally, rather than through artificial synthetic sampling. The Layer 1 Isolation Forest acts as a pre-filter: on the `v1.1.0` test partition it fast-clears 88.2% of benign rows. The candidate cohort passed to XGBoost in training is 28.9% fraud against 6.4% overall, about 4.5x denser, which stabilizes boosting. We then set `scale_pos_weight` (2.46) from this candidate subset."* |
+| *"What does 0.85 confidence actually mean?"* | *"Raw XGBoost scores are not probabilities, so we fitted non-parametric Isotonic Regression on held-out validation candidates to map them to an approximately calibrated $P(\text{Fraud} \mid x)$. On the `v1.1.0` test Layer-2 cohort, the 482 rows with $p \ge 0.85$ have mean p 0.992 and an observed fraud rate of 98.8%, and the cohort Brier score is 0.0089 [0.0043, 0.0136]."* |
 | *"How do you prove there is no data leakage?"* | *"We implemented chronological and agent-grouped partitioning (Dal Pozzolo et al., 2018). All splits strictly follow time progression, and agents in the test partition were never seen during training. The model is proven to generalize to brand-new agents in future time periods."* |
 | *"What happens if the ML microservice goes down?"* | *"Non-Functional Requirement NFR-08 dictates a fail-safe default. The Node.js gateway client has a 500ms timeout budget. If the microservice fails, the client automatically defaults to QUARANTINE, preventing unvetted transactions from ever reaching the escrow ledger."* |
 
 ---
 
-## 11. Verification Evidence (25/25 Pytest Suite)
+## 11. Verification Evidence (pytest suite)
 
-The implementation has been independently verified across 25 unit and integration tests:
+The ml-engine suite holds 150 tests (`python -m pytest -q`, from `ml-engine/` in the pinned `.venv`):
 
 ```text
-============================= test session starts =============================
-tests/test_pipeline.py            8 PASSED  (Traffic generation, injectors, feature math)
-tests/test_service.py             8 PASSED  (FastAPI endpoints, SHAP rankings, schema validation)
-tests/test_training_pipeline.py   9 PASSED  (Partitioning disjointness, calibration, latency SLA)
-============================= 25 passed in 21.25s =============================
+tests/test_evaluation.py          13  (Cluster bootstrap, event recall, train CLI, acceptance on shipped artifacts)
+tests/test_paysim_profile.py      36  (PaySim profiler, profile validation, calibrated hours, replay, determinism)
+tests/test_pipeline.py            19  (Traffic generation, injectors, feature math, batch/online parity)
+tests/test_service.py             61  (FastAPI endpoints, SHAP, schema validation, fail-safe error matrix)
+tests/test_training_pipeline.py   21  (Partitioning disjointness, calibration, artifact integrity, latency)
 ```
 
-**Delivered Artifacts:**
-- Core Package: [`engine/`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/engine) (`cascade.py`, `features.py`, `split.py`, `eval.py`, `stability.py`)
-- API Service: [`service/`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/service) (`app.py`, `schemas.py`, `config.py`)
-- Gateway Client: [`integration/risk_client.ts`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/integration/risk_client.ts)
-- Container: [`Dockerfile`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/Dockerfile), [`docker-compose.yml`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/docker-compose.yml)
-- Serialized Model: [`models/risk_cascade_v1.1.0.joblib`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/models/risk_cascade_v1.1.0.joblib)
-- Metrics & Ablation Data: [`reports/metrics.json`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/reports/metrics.json), [`reports/evaluation_report.md`](file:///C:/Users/rugog/Documents/CoDeAnDpRoJeCtS/Nathan-Rugo/Automative%20Commision%20and%20Escrow%20Payment/automative-commission-handling/backend/ml-engine/reports/evaluation_report.md)
+**Delivered Artifacts** (paths relative to `ml-engine/`):
+- Core Package: [`engine/`](engine) (`cascade.py`, `features.py`, `split.py`, `eval.py`, `stability.py`, `base_traffic.py`)
+- PaySim Profiler: [`engine/paysim_profile.py`](engine/paysim_profile.py) and its fitted output [`data/paysim_profile.json`](data/paysim_profile.json)
+- API Service: [`service/`](service) (`app.py`, `schemas.py`, `config.py`)
+- Gateway Client: [`integration/risk_client.ts`](integration/risk_client.ts)
+- Container: [`Dockerfile`](Dockerfile), [`docker-compose.yml`](docker-compose.yml)
+- Serialized Model: [`models/risk_cascade_v1.1.0.joblib`](models/risk_cascade_v1.1.0.joblib)
+- Metrics & Ablation Data: [`reports/metrics.json`](reports/metrics.json), [`reports/evaluation_report.md`](reports/evaluation_report.md)
+- PaySim Calibration Report: [`reports/paysim_calibration.md`](reports/paysim_calibration.md)
+- Tests: [`tests/`](tests), including [`tests/test_paysim_profile.py`](tests/test_paysim_profile.py)

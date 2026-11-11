@@ -181,6 +181,11 @@ Re-running `bootstrap_vm.sh` does nothing new. `gen_env.sh` refuses to touch an 
     `ml-engine/models/*.sha256` sidecar. `MODEL_VERSION` is a kept non-empty value, so you must edit it by hand
     in the deployed `.env` (`sed -i 's/^MODEL_VERSION=.*/MODEL_VERSION=v1.1.0/' .env`). Otherwise the gateway's
     fail-safe label keeps the old version. Then rebuild the ML engine and gateway with `make deploy-up`.
+  - **To roll back a model bump:**
+    1. `git revert <model commit>` restores the previous joblib and its sidecar, so exactly one sidecar is left again.
+    2. Run `bash infra/scripts/deploy/gen_env.sh --force <host>` to recompute `MODEL_SHA256` from that sidecar.
+    3. Set `MODEL_VERSION` back by hand, for example `sed -i 's/^MODEL_VERSION=.*/MODEL_VERSION=v1.0.0/' .env`.
+    4. Restart the ML engine and gateway with `make deploy-up`. Check that `/health` reports the old `model_version`.
   - After a re-host, run `make deploy-up` (the PWA is rebuilt for the new host), then update the Daraja portal URLs.
 - A **true wipe** destroys the database and logs everyone out. First take the backup in G.0, then run `make deploy-down && docker volume rm salesmesh_pg_data salesmesh_redis_data && rm .env`, then run `gen_env.sh` again.
 
