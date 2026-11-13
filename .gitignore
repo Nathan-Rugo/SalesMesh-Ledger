@@ -83,3 +83,7 @@ ufaa-returns/
 # gen_env.sh backups / temp files (secrets)
 .env.bak.*
 .env.tmp.*
+
+graphify-out/
+*.bundle
+*.stackdump
