@@ -55,14 +55,14 @@ describe('request payment (I/O matrix)', () => {
   it('happy path: one POST with a key → waiting → polls → Paid with the receipt and the seal; polling stops', async () => {
     const g = gateway(() => json(201, stkView()));
     await start(g);
-    fill('0792 189 991', '1');
+    fill('0798 765 432', '1');
     expect(await screen.findByRole('heading', { name: /Check the customer.s phone/ })).toBeInTheDocument();
     const [post] = g.posts();
     expect(g.posts()).toHaveLength(1);
-    expect(bodyOf(post!)).toEqual({ phone: '254792189991', amount: 1 });
+    expect(bodyOf(post!)).toEqual({ phone: '254798765432', amount: 1 });
     expect(keyOf(post!)).toMatch(/^stk-[0-9a-f]{32}$/);
-    expect(screen.getByText('0792 ••• 991')).toBeInTheDocument();
-    expect(screen.queryByText('254792189991')).not.toBeInTheDocument();
+    expect(screen.getByText('0798 ••• 432')).toBeInTheDocument();
+    expect(screen.queryByText('254798765432')).not.toBeInTheDocument();
 
     await tick(3_000);
     expect(g.gw.count(STATUS)).toBe(1);
@@ -80,7 +80,7 @@ describe('request payment (I/O matrix)', () => {
   it('customer cancels (1032 on a poll): "Customer cancelled", polling stops, Try again prefills a fresh request', async () => {
     const g = gateway(() => json(201, stkView()));
     await start(g);
-    fill('0792189991', '250');
+    fill('0798765432', '250');
     await screen.findByRole('heading', { name: /Check the customer.s phone/ });
     g.state.status = () => json(200, stkView({ status: 'FAILED', result_code: '1032' }));
     await tick(3_000);
@@ -90,7 +90,7 @@ describe('request payment (I/O matrix)', () => {
     expect(g.gw.count(STATUS)).toBe(polls);
 
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    expect(screen.getByLabelText("Customer's phone")).toHaveValue('0792 189 991');
+    expect(screen.getByLabelText("Customer's phone")).toHaveValue('0798 765 432');
     expect(screen.getByLabelText('Amount (KES)')).toHaveValue('250');
     fireEvent.click(screen.getByRole('button', { name: 'Send payment prompt' }));
     await waitFor(() => expect(g.posts()).toHaveLength(2));

@@ -22,7 +22,7 @@ describe('payment form validation (mirrors the gateway)', () => {
   ])('amount %j → %j', (raw, want) => expect(parseStkAmount(raw)).toBe(want));
 
   it('normalises the phone and reports each bad field', () => {
-    expect(validatePaymentForm({ phone: '0792 189 991', amount: '1' })).toEqual({ ok: true, value: { msisdn: '254792189991', amount: 1 } });
+    expect(validatePaymentForm({ phone: '0798 765 432', amount: '1' })).toEqual({ ok: true, value: { msisdn: '254798765432', amount: 1 } });
     expect(validatePaymentForm({ phone: '0612345678', amount: '0' })).toEqual({
       ok: false,
       error: { kind: 'invalid_payment_input', phone: true, amount: true },
@@ -30,7 +30,7 @@ describe('payment form validation (mirrors the gateway)', () => {
   });
 
   it('masks the phone and makes a fresh 128-bit key each time', () => {
-    expect(maskMsisdn('254792189991')).toBe('0792 ••• 991');
+    expect(maskMsisdn('254798765432')).toBe('0798 ••• 432');
     expect(maskMsisdn('nonsense')).toBe('•••');
     const a = newIdempotencyKey();
     expect(a).toMatch(/^stk-[0-9a-f]{32}$/);
