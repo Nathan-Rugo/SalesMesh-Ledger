@@ -1,6 +1,6 @@
 # ML Engine (Module 2) — Documentation Review & Improvement Notes
 
-**Reviewed document:** `NathanGithinji_166386_JullietKirui.tex`
+**Reviewed document:** the capstone project report
 **Scope:** Everything touching the two-layer ML risk engine — Sections 2.2.4, 3.2.1–3.2.4, 3.5.4, 4.2.1–4.2.2, 4.4.1, and 4.10.2.
 **Context:** Your milestone table shows the proposal defended and Chapter 4 "ongoing," so this is the right moment to tighten these sections before Chapter 5 implementation writing begins — the changes below are additive (new paragraphs, a couple of table rows) rather than a rewrite.
 

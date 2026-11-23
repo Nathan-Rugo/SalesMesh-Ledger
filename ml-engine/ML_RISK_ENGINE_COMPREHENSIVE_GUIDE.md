@@ -1,7 +1,7 @@
 # SalesMesh ML Risk Assessment Engine (Module 2) — Comprehensive System & Research Documentation
 
-**Author / Candidate:** Nathan Githinji (Adm: 166386)  
-**Supervisor:** Ms. Julliet Kirui  
+**Author / Candidate:** Nathan Githinji  
+**Supervisor:** Ms. Juliet Kirui  
 **Project:** Automated Risk-Adaptive Commission and Escrow Ledger for Distributed Retail Networks  
 **Module:** Module 2 — Analytical Risk Core & Machine Learning Microservice  
 **Document Version:** 1.0.0 (Production & Defense Ready)  
