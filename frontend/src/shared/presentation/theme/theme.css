@@ -287,7 +287,8 @@
 }
 
 /* Landing only: set by the boot script in app/page.tsx until GSAP has set the slip's first frame. */
-html.sm-motion [data-hero-receipt] {
+html.sm-motion [data-hero-receipt],
+html.sm-motion [data-hero-chip] {
   visibility: hidden;
 }
 

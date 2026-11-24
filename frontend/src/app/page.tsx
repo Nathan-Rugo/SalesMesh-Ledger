@@ -11,6 +11,19 @@ import { HeroReceipt } from './_landing/hero-receipt';
 import { LandingMotion } from './_landing/landing-motion';
 import { MOTION_BOOT } from './_landing/motion-boot';
 
+const SECTIONS = [
+  { href: '#how', label: 'How it works' },
+  { href: '#security', label: 'Security' },
+] as const;
+
+// What the system is built on: each one is in this repo, nothing aspirational.
+const STACK = [
+  { k: 'Payments', v: 'M-Pesa Daraja STK Push' },
+  { k: 'Ledger', v: 'Hyperledger Fabric' },
+  { k: 'Risk', v: 'Explainable ML scores' },
+  { k: 'App', v: 'Installable, works offline' },
+] as const;
+
 function Ctas({ className }: { className?: string }) {
   return (
     <div className={cn('flex w-full flex-col gap-3 sm:w-auto sm:flex-row', className)}>
@@ -37,6 +50,13 @@ export default function Home() {
         />
         <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
           <Logo />
+          <nav aria-label="Sections" className="hidden items-center gap-1 sm:flex">
+            {SECTIONS.map((l) => (
+              <a key={l.href} href={l.href} className="inline-flex min-h-11 items-center rounded-lg px-3 text-[15px] font-medium text-ink-muted transition-colors hover:text-ink">
+                {l.label}
+              </a>
+            ))}
+          </nav>
           <div className="flex items-center gap-1">
             <InstallPrompt className="px-3" />
             <Link href="/login" className={buttonClasses('ghost', false, 'whitespace-nowrap')}>
@@ -63,11 +83,11 @@ export default function Home() {
             <div className="dot-grid relative flex justify-center rounded-[1.75rem] px-3 pt-10 pb-12 sm:px-6 sm:pt-14 sm:pb-16">
               <HeroReceipt />
               <dl aria-label="What the slip records" className="pointer-events-none absolute inset-y-0 hidden w-full max-w-5xl items-center justify-between px-8 lg:flex">
-                <div className="sm-surface pointer-events-auto flex flex-col gap-0.5 rounded-xl border border-line bg-surface px-4 py-3 text-left shadow-soft">
+                <div data-hero-chip="" className="sm-surface pointer-events-auto flex flex-col gap-0.5 rounded-xl border border-line bg-surface px-4 py-3 text-left shadow-soft">
                   <dt className="text-[13px] text-ink-muted">Callback fingerprint</dt>
                   <dd className="font-mono text-[14px] text-ink">9f3a·c1e0</dd>
                 </div>
-                <div className="sm-surface pointer-events-auto flex flex-col gap-0.5 rounded-xl border border-line bg-surface px-4 py-3 text-left shadow-soft">
+                <div data-hero-chip="" className="sm-surface pointer-events-auto flex flex-col gap-0.5 rounded-xl border border-line bg-surface px-4 py-3 text-left shadow-soft">
                   <dt className="text-[13px] text-ink-muted">Held in escrow</dt>
                   <dd className="font-mono text-[14px] text-ink">
                     10:42 <span aria-hidden>→</span>
@@ -77,6 +97,15 @@ export default function Home() {
               </dl>
             </div>
           </div>
+
+          <dl aria-label="Built on" className="mx-auto mt-10 grid max-w-5xl grid-cols-2 gap-y-5 border-y border-dashed border-line-strong py-5 lg:grid-cols-4">
+            {STACK.map((f) => (
+              <div key={f.k} className="flex flex-col gap-1 px-4 text-left lg:border-l lg:border-dashed lg:border-line-strong lg:first:border-l-0">
+                <dt className="font-mono text-[12px] font-medium tracking-[0.12em] text-ink-muted uppercase">{f.k}</dt>
+                <dd className="text-[15px] font-medium text-ink">{f.v}</dd>
+              </div>
+            ))}
+          </dl>
         </section>
 
         <BeamFlow />
@@ -91,7 +120,7 @@ export default function Home() {
         </section>
       </main>
 
-      <SiteFooter />
+      <SiteFooter full />
       <LandingMotion />
     </div>
   );

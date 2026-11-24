@@ -15,7 +15,7 @@ const HOPS: readonly { title: string; text: string; icon: IconName; chip: string
  */
 export function BeamFlow() {
   return (
-    <section data-band="night" aria-labelledby="flow-heading" className="relative overflow-hidden bg-canvas text-ink">
+    <section id="how" data-band="night" aria-labelledby="flow-heading" className="relative scroll-mt-16 overflow-hidden bg-canvas text-ink">
       <div aria-hidden className="grid-lines absolute inset-0" />
       <div className="relative mx-auto w-full max-w-6xl px-4 py-20 sm:px-6 lg:py-28">
         <h2 id="flow-heading" className="max-w-[26ch] text-[1.9rem] leading-[1.12] font-medium tracking-[-0.03em] text-balance sm:text-[2.75rem]">
@@ -27,7 +27,7 @@ export function BeamFlow() {
             <li key={h.title} className="relative">
               <div className="sm-surface flex h-full flex-col gap-3 rounded-2xl border border-line bg-surface p-5 shadow-soft">
                 <div className="flex items-center justify-between gap-3">
-                  <span aria-hidden className="flex size-10 items-center justify-center rounded-xl border border-line text-accent">
+                  <span aria-hidden data-hop-icon="" className="flex size-10 items-center justify-center rounded-xl border border-line text-accent">
                     <Icon name={h.icon} />
                   </span>
                   <span
