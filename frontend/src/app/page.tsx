@@ -11,6 +11,19 @@ import { HeroReceipt } from './_landing/hero-receipt';
 import { LandingMotion } from './_landing/landing-motion';
 import { MOTION_BOOT } from './_landing/motion-boot';
 
+const SECTIONS = [
+  { href: '#how', label: 'How it works' },
+  { href: '#security', label: 'Security' },
+] as const;
+
+// What the system is built on: each one is in this repo, nothing aspirational.
+const STACK = [
+  { k: 'Payments', v: 'M-Pesa Daraja STK Push' },
+  { k: 'Ledger', v: 'Hyperledger Fabric' },
+  { k: 'Risk', v: 'Explainable ML scores' },
+  { k: 'App', v: 'Installable, works offline' },
+] as const;
+
 function Ctas({ className }: { className?: string }) {
   return (
     <div className={cn('flex w-full flex-col gap-3 sm:w-auto sm:flex-row', className)}>
@@ -37,6 +50,13 @@ export default function Home() {
         />
         <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-4 sm:px-6">
           <Logo />
+          <nav aria-label="Sections" className="hidden items-center gap-1 sm:flex">
+            {SECTIONS.map((l) => (
+              <a key={l.href} href={l.href} className="inline-flex min-h-11 items-center rounded-lg px-3 text-[15px] font-medium text-ink-muted transition-colors hover:text-ink">
+                {l.label}
+              </a>
+            ))}
+          </nav>
           <div className="flex items-center gap-1">
             <InstallPrompt className="px-3" />
             <Link href="/login" className={buttonClasses('ghost', false, 'whitespace-nowrap')}>
@@ -49,9 +69,9 @@ export default function Home() {
       <main className="flex-1">
         <section className="mx-auto w-full max-w-6xl px-4 pt-10 pb-16 sm:px-6 lg:pt-16 lg:pb-24">
           <div className="flex flex-col items-center gap-6 text-center">
-            <h1 className="max-w-[24ch] text-[2.1rem] leading-[1.08] font-medium tracking-[-0.035em] text-balance text-ink sm:text-[2.9rem] lg:text-[3.4rem]">
+            <h1 className="max-w-[22ch] font-display text-[2.4rem] leading-[1.04] font-normal tracking-[-0.02em] text-balance text-ink sm:text-[3.3rem] lg:text-[4rem]">
               Commission you can trace to the shilling.{' '}
-              <span className="text-ink-muted">Held until the payment settles, then sent to your M-Pesa.</span>
+              <span className="text-ink-muted italic">Held until the payment settles, then sent to your M-Pesa.</span>
             </h1>
             <p className="max-w-[48ch] text-lg leading-relaxed text-ink-muted">Every step is written to a ledger nobody can quietly edit.</p>
             <Ctas className="justify-center" />
@@ -63,11 +83,11 @@ export default function Home() {
             <div className="dot-grid relative flex justify-center rounded-[1.75rem] px-3 pt-10 pb-12 sm:px-6 sm:pt-14 sm:pb-16">
               <HeroReceipt />
               <dl aria-label="What the slip records" className="pointer-events-none absolute inset-y-0 hidden w-full max-w-5xl items-center justify-between px-8 lg:flex">
-                <div className="sm-surface pointer-events-auto flex flex-col gap-0.5 rounded-xl border border-line bg-surface px-4 py-3 text-left shadow-soft">
+                <div data-hero-chip="" className="sm-surface pointer-events-auto flex flex-col gap-0.5 rounded-xl border border-line bg-surface px-4 py-3 text-left shadow-soft">
                   <dt className="text-[13px] text-ink-muted">Callback fingerprint</dt>
                   <dd className="font-mono text-[14px] text-ink">9f3a·c1e0</dd>
                 </div>
-                <div className="sm-surface pointer-events-auto flex flex-col gap-0.5 rounded-xl border border-line bg-surface px-4 py-3 text-left shadow-soft">
+                <div data-hero-chip="" className="sm-surface pointer-events-auto flex flex-col gap-0.5 rounded-xl border border-line bg-surface px-4 py-3 text-left shadow-soft">
                   <dt className="text-[13px] text-ink-muted">Held in escrow</dt>
                   <dd className="font-mono text-[14px] text-ink">
                     10:42 <span aria-hidden>→</span>
@@ -77,13 +97,22 @@ export default function Home() {
               </dl>
             </div>
           </div>
+
+          <dl aria-label="Built on" className="mx-auto mt-10 grid max-w-5xl grid-cols-2 gap-y-5 border-y border-dashed border-line-strong py-5 lg:grid-cols-4">
+            {STACK.map((f) => (
+              <div key={f.k} className="flex flex-col gap-1 px-4 text-left lg:border-l lg:border-dashed lg:border-line-strong lg:first:border-l-0">
+                <dt className="font-mono text-[12px] font-medium tracking-[0.12em] text-ink-muted uppercase">{f.k}</dt>
+                <dd className="text-[15px] font-medium text-ink">{f.v}</dd>
+              </div>
+            ))}
+          </dl>
         </section>
 
         <BeamFlow />
         <Bento />
 
         <section aria-labelledby="cta-heading" className="mx-auto flex w-full max-w-6xl flex-col items-center gap-6 px-4 pt-4 pb-20 text-center sm:px-6 lg:pb-28">
-          <h2 id="cta-heading" className="max-w-[22ch] text-[1.9rem] leading-[1.12] font-medium tracking-[-0.03em] text-balance text-ink sm:text-[2.75rem]">
+          <h2 id="cta-heading" className="max-w-[22ch] font-display text-[2.1rem] leading-[1.08] font-normal tracking-[-0.015em] text-balance text-ink sm:text-[3rem]">
             Your next commission, on a receipt you can check.
           </h2>
           <p className="max-w-[52ch] text-ink-muted">Sign in with your phone number and PIN, or activate with the PIN from your merchant.</p>
@@ -91,7 +120,7 @@ export default function Home() {
         </section>
       </main>
 
-      <SiteFooter />
+      <SiteFooter full />
       <LandingMotion />
     </div>
   );

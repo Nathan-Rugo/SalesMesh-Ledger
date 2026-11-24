@@ -21,6 +21,11 @@ function heroTimeline() {
   const target = Number(counter?.dataset.count ?? 0);
   const n = { v: 0 };
   const tl = gsap.timeline({ delay: 0.15, defaults: { ease: 'power3.out' } });
+  // While the slip feeds: the status light flickers and the body hums (both end where they started).
+  const led = document.querySelector('[data-printer-led]');
+  const printer = document.querySelector('[data-printer]');
+  if (led) tl.fromTo(led, { opacity: 0.25 }, { opacity: 1, duration: 0.09, repeat: 9, yoyo: true, ease: 'none' }, 0);
+  if (printer) tl.fromTo(printer, { y: 0 }, { y: 0.8, duration: 0.05, repeat: 17, yoyo: true, ease: 'none' }, 0);
   tl.fromTo(
     receipt,
     { clipPath: 'inset(0% -40px 100% -40px)', y: -28 },
@@ -47,6 +52,10 @@ function heroTimeline() {
       '-=0.15'
     )
     .to(receipt, { y: 3, duration: 0.07, yoyo: true, repeat: 1, ease: 'power1.inOut' }, '-=0.3');
+  // The two annotations slide in from either side once the slip is stamped.
+  document.querySelectorAll<HTMLElement>('[data-hero-chip]').forEach((chip, i) => {
+    tl.fromTo(chip, { autoAlpha: 0, x: i === 0 ? -18 : 18 }, { autoAlpha: 1, x: 0, duration: 0.55 }, i === 0 ? '-=0.1' : '<0.12');
+  });
   // Revert leaves text alone, so put the real amount back.
   return () => counter && (counter.textContent = shillings(target));
 }
@@ -62,8 +71,10 @@ function beamFlow(wide: boolean) {
   if (!flow) return () => {};
   const chips = [...flow.querySelectorAll<HTMLElement>('[data-chip]')];
   const pulses = [...flow.querySelectorAll<HTMLElement>('[data-pulse]')];
-  const light = (chip: HTMLElement, on: boolean) => {
+  const light = (chip: HTMLElement, on: boolean, pop = false) => {
     chip.toggleAttribute('data-on', on);
+    const icon = chip.closest('li')?.querySelector('[data-hop-icon]');
+    if (pop && icon) gsap.fromTo(icon, { scale: 0.82 }, { scale: 1, duration: 0.5, ease: 'back.out(3)' });
     const label = chip.querySelector('[data-chip-label]');
     if (label) label.textContent = on ? chip.dataset.chip! : 'Waiting';
   };
@@ -73,7 +84,7 @@ function beamFlow(wide: boolean) {
   pulses.forEach((p, i) => {
     tl.fromTo(p, { [axis]: -100, autoAlpha: 1 }, { [axis]: 100, duration: 0.9, ease: 'power1.inOut' }, '+=0.45')
       .set(p, { autoAlpha: 0 })
-      .call(() => light(chips[i + 1]!, true));
+      .call(() => light(chips[i + 1]!, true, true));
   });
   onFirstView(flow, () => tl.play());
   return () => chips.forEach((c) => light(c, true));
@@ -98,7 +109,16 @@ function bento() {
     const bars = tile.querySelectorAll('[data-bar]');
     if (bars.length) tl.fromTo(bars, { scaleX: 0 }, { scaleX: 1, stagger: 0.1, duration: 0.7 }, '-=0.2');
     const sms = tile.querySelector('[data-sms]');
-    if (sms) tl.fromTo(sms, { yPercent: -140, autoAlpha: 0 }, { yPercent: 0, autoAlpha: 1, duration: 0.6, ease: 'back.out(1.6)' }, '+=0.5');
+    const phone = tile.querySelector('[data-phone]');
+    // The phone buzzes, then the banner drops out of the camera island like a real notification.
+    if (phone && sms) tl.fromTo(phone, { rotate: 0 }, { rotate: 1.2, duration: 0.05, repeat: 7, yoyo: true, ease: 'none' }, '+=0.5');
+    if (sms)
+      tl.fromTo(
+        sms,
+        { y: -70, scale: 0.86, autoAlpha: 0, transformOrigin: '50% 0%' },
+        { y: 0, scale: 1, autoAlpha: 1, duration: 0.7, ease: 'back.out(1.5)' },
+        phone ? '<0.1' : '+=0.5'
+      );
   });
 
   const time = document.querySelector<HTMLTimeElement>('[data-countdown]');

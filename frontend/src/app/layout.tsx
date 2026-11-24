@@ -1,12 +1,14 @@
 import type { Metadata, Viewport } from 'next';
-import { Instrument_Sans, JetBrains_Mono } from 'next/font/google';
+import { IBM_Plex_Mono, IBM_Plex_Sans, Newsreader } from 'next/font/google';
 import type { ReactNode } from 'react';
 import './globals.css';
 import { Providers } from './providers';
 
 // `optional`: no late swap of the hero text, so no LCP re-paint or layout shift on a slow first visit.
-const instrument = Instrument_Sans({ subsets: ['latin'], variable: '--font-instrument', display: 'optional' });
-const jetbrains = JetBrains_Mono({ subsets: ['latin'], variable: '--font-jetbrains', display: 'swap', weight: ['400', '500', '700'] });
+const plexSans = IBM_Plex_Sans({ subsets: ['latin'], variable: '--font-plex-sans', display: 'optional', weight: ['400', '500', '600', '700'] });
+const plexMono = IBM_Plex_Mono({ subsets: ['latin'], variable: '--font-plex-mono', display: 'swap', weight: ['400', '500', '700'] });
+// Editorial serif for landing headlines only: reads like a statement header, not a template.
+const newsreader = Newsreader({ subsets: ['latin'], variable: '--font-newsreader', display: 'optional', weight: ['400', '500', '600'] });
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
@@ -30,7 +32,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     // The landing boot script adds `sm-motion` to <html> before hydration.
-    <html lang="en-KE" suppressHydrationWarning className={`${instrument.variable} ${jetbrains.variable}`}>
+    <html lang="en-KE" suppressHydrationWarning className={`${plexSans.variable} ${plexMono.variable} ${newsreader.variable}`}>
       <body className="min-h-dvh bg-canvas text-ink">
         <Providers>{children}</Providers>
       </body>
