@@ -80,7 +80,7 @@ export function Bento() {
         </Tile>
 
         <Tile title="Your agent app" text="Balance, escrow and payouts on your phone. The M-Pesa SMS lands as the money does." className="sm:row-span-2 lg:row-span-3">
-          <div className="dot-grid -mx-1 my-auto flex items-center justify-center rounded-xl px-1 py-4">
+          <div className="dot-grid -mx-2 mt-auto flex flex-1 items-center rounded-xl px-2 py-6">
             <PhoneMock />
           </div>
         </Tile>

@@ -45,7 +45,7 @@ function heroTimeline(shown: boolean) {
     tl.fromTo(chip, { autoAlpha: 0, x: i === 0 ? -18 : 18 }, { autoAlpha: 1, x: 0, duration: 0.55 }, `stamp+=${0.5 + i * 0.12}`);
   });
   // Prints once the printer sits in the upper part of the screen, so the feed is seen from the start.
-  replayInView(tl, printer, 'top 60%', 'top 8%', shown);
+  replayInView(tl, printer, 'top 60%', shown);
   return () => tl.progress(1);
 }
 
@@ -55,16 +55,26 @@ function onFirstView(el: Element | null, play: () => void, start = 'top 85%') {
 }
 
 /**
- * Plays `tl` each time `el` comes well into view, from below (`start`) or from above (`end`), and
- * rewinds it only once `el` is fully off screen, so a replay never visibly jumps back to its start.
- * Each run stays finite (WCAG 2.2.2). `shown`: start in the finished state (content already visible).
+ * Plays `tl` each time `el` comes well into view while scrolling down (`start`). Scrolling back up past
+ * it leaves it finished; only once it has dropped fully below the screen is it rewound, so the next
+ * pass down replays it and a replay never visibly jumps back. Each run stays finite (WCAG 2.2.2).
+ * `shown`: start in the finished state (content already visible).
  */
-function replayInView(tl: gsap.core.Timeline, el: Element | null, start = 'bottom 92%', end = 'top 8%', shown = false) {
+function replayInView(tl: gsap.core.Timeline, el: Element | null, start = 'bottom 92%', shown = false) {
   if (!el) return;
   if (shown) tl.progress(1).pause();
   else tl.pause(0);
-  ScrollTrigger.create({ trigger: el, start, end, onEnter: () => tl.restart(), onEnterBack: () => tl.restart() });
-  ScrollTrigger.create({ trigger: el, start: 'top bottom', end: 'bottom top', onLeave: () => tl.pause(0), onLeaveBack: () => tl.pause(0) });
+  ScrollTrigger.create({ trigger: el, start, onEnter: () => tl.restart() });
+  ScrollTrigger.create({
+    trigger: el,
+    start: 'top bottom',
+    end: 'bottom top',
+    onLeaveBack: () => tl.pause(0), // now fully below the screen: rewind for the next pass down
+    // Coming up from below onto one that never played (e.g. page reloaded further down): show it finished.
+    onEnterBack: () => {
+      if (!tl.isActive() && tl.progress() < 1) tl.progress(1).pause();
+    },
+  });
 }
 
 /** "How a shilling travels": one pass (~4 s) of a pulse along each beam, lighting the next chip; ends with every chip lit. */
@@ -88,7 +98,7 @@ function beamFlow(wide: boolean) {
       .set(p, { autoAlpha: 0 })
       .call(() => light(chips[i + 1]!, true, true));
   });
-  replayInView(tl, flow, 'top 70%', 'top 10%');
+  replayInView(tl, flow, 'top 70%');
   return () => chips.forEach((c) => light(c, true));
 }
 
@@ -96,7 +106,7 @@ function beamFlow(wide: boolean) {
 function bento() {
   document.querySelectorAll<HTMLElement>('[data-tile]').forEach((tile) => {
     const tl = gsap.timeline({ defaults: { ease: 'power3.out' } });
-    replayInView(tl, tile, 'top 85%', 'top 10%');
+    replayInView(tl, tile, 'top 85%');
     tl.fromTo(tile, { autoAlpha: 0, y: 24 }, { autoAlpha: 1, y: 0, duration: 0.6 });
     const rows = tile.querySelectorAll('[data-ledger-row]');
     if (rows.length) tl.fromTo(rows, { autoAlpha: 0, x: -8 }, { autoAlpha: 1, x: 0, stagger: 0.12, duration: 0.4 }, '-=0.2');
@@ -125,7 +135,7 @@ function bento() {
       { y: 0, scale: 1, autoAlpha: 1, duration: 0.7, ease: 'back.out(1.5)' },
       phone ? '<0.1' : 0
     );
-    replayInView(ping, phone ?? sms, 'center 70%', 'center 30%');
+    replayInView(ping, phone ?? sms, 'center 70%');
   });
 
   const time = document.querySelector<HTMLTimeElement>('[data-countdown]');
