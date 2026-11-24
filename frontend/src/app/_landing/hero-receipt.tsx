@@ -6,29 +6,17 @@ import { StatusPill } from '@/shared/presentation/ui/status-pill';
 const SAMPLE_CENTS = 452_500;
 
 /**
- * A countertop thermal printer drawn in CSS: a top face tilted back in perspective (with the paper
- * roll showing through its window), a front face with the status light, and the slot the slip feeds
- * from. Decorative only; landing-motion.tsx blinks the light and judders the body while it prints.
+ * A simple countertop thermal printer. Its mouth is the bottom edge: the slip sits inside a clipping
+ * box that starts there, so when landing-motion.tsx feeds it down it comes out of the printer.
  */
 function ThermalPrinter() {
   return (
-    <div aria-hidden data-printer="" className="relative z-10 -mx-3 sm:-mx-5">
-      {/* Top face, leaning away from the viewer. */}
-      <div className="mx-3 h-9 origin-bottom rounded-t-[1.35rem] bg-linear-to-b from-[#3a4a42] to-[#24312b] [transform:perspective(520px)_rotateX(42deg)]">
-        <div className="mx-auto h-full w-2/3 pt-2">
-          <div className="h-4 rounded-full bg-linear-to-b from-[#f7f4ea] to-[#d9d3c2] shadow-[inset_0_-2px_3px_rgb(0_0_0/0.25)]" />
-        </div>
+    <div aria-hidden data-printer="" className="relative z-10 -mx-4 sm:-mx-6">
+      <div className="relative h-14 rounded-[1.25rem] bg-linear-to-b from-[#34433c] to-[#17211c] shadow-[inset_0_1px_0_rgb(255_255_255/0.14),0_16px_26px_-14px_rgb(10_31_22/0.55)]">
+        <span data-printer-led="" className="absolute top-1/2 right-5 size-2 -translate-y-1/2 rounded-full bg-[#00d26a] shadow-[0_0_8px_2px_rgb(0_210_106/0.55)]" />
       </div>
-      {/* Front face. */}
-      <div className="relative h-16 rounded-t-md rounded-b-2xl bg-linear-to-b from-[#2b3832] via-[#1f2a25] to-[#16201b] shadow-[0_1px_0_rgb(255_255_255/0.08)_inset,0_18px_30px_-12px_rgb(10_31_22/0.55),0_4px_8px_-2px_rgb(10_31_22/0.35)]">
-        <span className="absolute top-3 left-5 font-mono text-[10px] font-medium tracking-[0.18em] text-white/45 uppercase">SalesMesh · TM-80</span>
-        <span className="absolute top-3 right-5 flex items-center gap-1.5">
-          <span data-printer-led="" className="size-2 rounded-full bg-[#00d26a] shadow-[0_0_8px_2px_rgb(0_210_106/0.55)]" />
-          <span className="size-2 rounded-full bg-white/15" />
-        </span>
-        {/* The paper slot: a dark groove with a lit lip. */}
-        <span className="absolute inset-x-5 bottom-3 h-2 rounded-full bg-black/85 shadow-[inset_0_2px_3px_rgb(0_0_0/0.9),0_1px_0_rgb(255_255_255/0.12)]" />
-      </div>
+      {/* The mouth: a dark lip just wider than the paper. */}
+      <span className="absolute inset-x-6 -bottom-1 h-2 rounded-full bg-[#0b120f] shadow-[inset_0_1px_2px_rgb(0_0_0/0.9)]" />
     </div>
   );
 }
@@ -42,8 +30,11 @@ export function HeroReceipt() {
   return (
     <div className="relative w-full max-w-[26rem]">
       <ThermalPrinter />
-      {/* Tucked under the slot lip so the slip reads as feeding out of the printer. */}
-      <Receipt data-hero-receipt="" role="group" aria-label="Sample commission receipt" className="relative z-0 mx-3 -mt-2 pt-7 pb-7 sm:px-7">
+      {/* Clipped at the mouth (padding keeps the paper's side and bottom shadow visible). */}
+      <div className="relative -mx-4 -mt-1 overflow-hidden px-4 pb-10 sm:-mx-6 sm:px-6">
+        {/* The lip's shadow on the paper as it leaves the mouth. */}
+        <span aria-hidden className="pointer-events-none absolute inset-x-6 top-0 z-10 h-3 bg-linear-to-b from-black/25 to-transparent" />
+      <Receipt data-hero-receipt="" role="group" aria-label="Sample commission receipt" className="mx-3 pt-6 pb-7 sm:px-7">
         <div data-hero-line="" className="flex items-center justify-between gap-3">
           <ReceiptEyebrow>Sample receipt</ReceiptEyebrow>
           <span className="font-mono text-[13px] font-medium text-ink tabular-nums">TJK4QX7Z1P</span>
@@ -74,11 +65,14 @@ export function HeroReceipt() {
           <span data-hero-line="">
             <StatusPill status="CLEAR" />
           </span>
-          <span data-stamp="" className="inline-block">
+          <span data-stamp="" className="relative inline-block">
             <ClearedSeal size="lg" />
+            {/* Ink ring that spreads once as the stamp lands. */}
+            <span aria-hidden data-stamp-ink="" className="pointer-events-none absolute inset-0 rounded-xl border-2 border-[var(--sm-stamp)] opacity-0" />
           </span>
         </div>
       </Receipt>
+      </div>
     </div>
   );
 }

@@ -5,59 +5,46 @@ import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import Lenis from 'lenis';
 import 'lenis/dist/lenis.css';
-import { moneyParts } from '@/shared/domain/money';
 import { MOTION_PENDING } from './motion-boot';
 import { clock, HOLD_LEFT_S, HOLD_TOTAL_S, isoDuration } from './sample-hold';
 
 gsap.registerPlugin(useGSAP, ScrollTrigger);
 
-const shillings = (n: number) => moneyParts(Math.round(n) * 100).integer;
-
-/** Hero: the slip prints out of the slot, lines settle, the amount ticks up, the seal stamps once. */
+/** Hero: the printer feeds the slip out of its mouth, then the seal is pressed onto it. */
 function heroTimeline() {
   const receipt = document.querySelector<HTMLElement>('[data-hero-receipt]');
   if (!receipt) return () => {};
-  const counter = receipt.querySelector<HTMLElement>('[data-count]');
-  const target = Number(counter?.dataset.count ?? 0);
-  const n = { v: 0 };
-  const tl = gsap.timeline({ delay: 0.15, defaults: { ease: 'power3.out' } });
-  // While the slip feeds: the status light flickers and the body hums (both end where they started).
+  const stamp = receipt.querySelector('[data-stamp]');
+  const ink = receipt.querySelector('[data-stamp-ink]');
   const led = document.querySelector('[data-printer-led]');
   const printer = document.querySelector('[data-printer]');
-  if (led) tl.fromTo(led, { opacity: 0.25 }, { opacity: 1, duration: 0.09, repeat: 9, yoyo: true, ease: 'none' }, 0);
-  if (printer) tl.fromTo(printer, { y: 0 }, { y: 0.8, duration: 0.05, repeat: 17, yoyo: true, ease: 'none' }, 0);
-  tl.fromTo(
-    receipt,
-    { clipPath: 'inset(0% -40px 100% -40px)', y: -28 },
-    { clipPath: 'inset(0% -40px -40px -40px)', y: 0, duration: 1, ease: 'power2.out', clearProps: 'clipPath' }
-  )
-    // Explicit end values: the slip is still visibility:hidden (boot class) when this is built, so
-    // a .from() would read that back as the end state.
-    .fromTo(receipt.querySelectorAll('[data-hero-line]'), { opacity: 0, y: 8 }, { opacity: 1, y: 0, stagger: 0.08, duration: 0.45 }, '-=0.6')
-    .to(
-      n,
-      {
-        v: target,
-        duration: 1.1,
-        ease: 'power2.out',
-        onStart: () => counter && (counter.textContent = shillings(0)),
-        onUpdate: () => counter && (counter.textContent = shillings(n.v)),
-      },
-      '<'
-    )
-    .fromTo(
-      receipt.querySelector('[data-stamp]'),
-      { scale: 2.3, rotate: -14, autoAlpha: 0 },
-      { scale: 1, rotate: 0, autoAlpha: 1, duration: 0.45, ease: 'back.out(2.4)' },
-      '-=0.15'
-    )
-    .to(receipt, { y: 3, duration: 0.07, yoyo: true, repeat: 1, ease: 'power1.inOut' }, '-=0.3');
+  const FEED_S = 1.6;
+  const tl = gsap.timeline({ delay: 0.2, defaults: { ease: 'power3.out' } });
+  tl.addLabel('feed', 0)
+    // Thermal printers feed at a constant rate: linear, from fully inside the mouth to fully out.
+    .fromTo(receipt, { yPercent: -100 }, { yPercent: 0, duration: FEED_S, ease: 'none' }, 'feed');
+  // While it feeds the status light flickers and the body hums; both end where they started.
+  if (led) tl.fromTo(led, { opacity: 0.25 }, { opacity: 1, duration: 0.1, repeat: 15, yoyo: true, ease: 'none' }, 'feed');
+  if (printer) tl.fromTo(printer, { y: 0 }, { y: 0.7, duration: 0.05, repeat: 31, yoyo: true, ease: 'none' }, 'feed');
+
+  tl.addLabel('stamp', `feed+=${FEED_S + 0.3}`);
+  if (stamp) {
+    // Lifted, tilted and soft (out of focus) above the paper; drops fast, squashes on contact, settles.
+    tl.fromTo(
+      stamp,
+      { autoAlpha: 0, scale: 1.8, y: -40, rotate: -16, filter: 'blur(3px)' },
+      { autoAlpha: 1, scale: 0.9, y: 0, rotate: -3, filter: 'blur(0px)', duration: 0.3, ease: 'power3.in' },
+      'stamp'
+    ).to(stamp, { scale: 1, rotate: 0, duration: 0.4, ease: 'back.out(3)', clearProps: 'filter' }, 'stamp+=0.3');
+    // The impact: the paper dips under the press and a ring of ink spreads once.
+    tl.to(receipt, { y: 3, duration: 0.07, yoyo: true, repeat: 1, ease: 'power1.inOut' }, 'stamp+=0.3');
+    if (ink) tl.fromTo(ink, { autoAlpha: 0.6, scale: 0.92 }, { autoAlpha: 0, scale: 1.35, duration: 0.7, ease: 'power2.out' }, 'stamp+=0.3');
+  }
   // The two annotations slide in from either side once the slip is stamped.
   document.querySelectorAll<HTMLElement>('[data-hero-chip]').forEach((chip, i) => {
-    tl.fromTo(chip, { autoAlpha: 0, x: i === 0 ? -18 : 18 }, { autoAlpha: 1, x: 0, duration: 0.55 }, i === 0 ? '-=0.1' : '<0.12');
+    tl.fromTo(chip, { autoAlpha: 0, x: i === 0 ? -18 : 18 }, { autoAlpha: 1, x: 0, duration: 0.55 }, `stamp+=${0.5 + i * 0.12}`);
   });
-  // Revert leaves text alone, so put the real amount back.
-  return () => counter && (counter.textContent = shillings(target));
+  return () => {};
 }
 
 /** Run `play` once, the first time `el` scrolls into view. Every run is finite (<= 5 s, WCAG 2.2.2). */

@@ -69,9 +69,9 @@ export default function Home() {
       <main className="flex-1">
         <section className="mx-auto w-full max-w-6xl px-4 pt-10 pb-16 sm:px-6 lg:pt-16 lg:pb-24">
           <div className="flex flex-col items-center gap-6 text-center">
-            <h1 className="max-w-[22ch] font-display text-[2.4rem] leading-[1.04] font-normal tracking-[-0.02em] text-balance text-ink sm:text-[3.3rem] lg:text-[4rem]">
+            <h1 className="max-w-[24ch] text-[2.1rem] leading-[1.08] font-medium tracking-[-0.035em] text-balance text-ink sm:text-[2.9rem] lg:text-[3.4rem]">
               Commission you can trace to the shilling.{' '}
-              <span className="text-ink-muted italic">Held until the payment settles, then sent to your M-Pesa.</span>
+              <span className="text-ink-muted">Held until the payment settles, then sent to your M-Pesa.</span>
             </h1>
             <p className="max-w-[48ch] text-lg leading-relaxed text-ink-muted">Every step is written to a ledger nobody can quietly edit.</p>
             <Ctas className="justify-center" />
@@ -112,7 +112,7 @@ export default function Home() {
         <Bento />
 
         <section aria-labelledby="cta-heading" className="mx-auto flex w-full max-w-6xl flex-col items-center gap-6 px-4 pt-4 pb-20 text-center sm:px-6 lg:pb-28">
-          <h2 id="cta-heading" className="max-w-[22ch] font-display text-[2.1rem] leading-[1.08] font-normal tracking-[-0.015em] text-balance text-ink sm:text-[3rem]">
+          <h2 id="cta-heading" className="max-w-[22ch] text-[1.9rem] leading-[1.12] font-medium tracking-[-0.03em] text-balance text-ink sm:text-[2.75rem]">
             Your next commission, on a receipt you can check.
           </h2>
           <p className="max-w-[52ch] text-ink-muted">Sign in with your phone number and PIN, or activate with the PIN from your merchant.</p>

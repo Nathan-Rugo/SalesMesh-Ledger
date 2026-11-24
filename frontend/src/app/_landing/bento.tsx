@@ -41,7 +41,7 @@ function Tile({ title, text, className, children }: { title: string; text: React
 export function Bento() {
   return (
     <section id="security" aria-labelledby="bento-heading" className="scroll-mt-16 mx-auto w-full max-w-6xl px-4 py-20 sm:px-6 lg:py-28">
-      <h2 id="bento-heading" className="max-w-[28ch] font-display text-[2.1rem] leading-[1.08] font-normal tracking-[-0.015em] text-balance text-ink sm:text-[3rem]">
+      <h2 id="bento-heading" className="max-w-[28ch] text-[1.9rem] leading-[1.12] font-medium tracking-[-0.03em] text-balance text-ink sm:text-[2.75rem]">
         A record nobody can quietly edit.{' '}
         <span className="text-ink-muted">Every callback fingerprinted, every retry caught, every risky payout held for a person.</span>
       </h2>

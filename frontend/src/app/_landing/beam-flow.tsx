@@ -18,7 +18,7 @@ export function BeamFlow() {
     <section id="how" data-band="night" aria-labelledby="flow-heading" className="relative scroll-mt-16 overflow-hidden bg-canvas text-ink">
       <div aria-hidden className="grid-lines absolute inset-0" />
       <div className="relative mx-auto w-full max-w-6xl px-4 py-20 sm:px-6 lg:py-28">
-        <h2 id="flow-heading" className="max-w-[26ch] font-display text-[2.1rem] leading-[1.08] font-normal tracking-[-0.015em] text-balance sm:text-[3rem]">
+        <h2 id="flow-heading" className="max-w-[26ch] text-[1.9rem] leading-[1.12] font-medium tracking-[-0.03em] text-balance sm:text-[2.75rem]">
           How a shilling travels. <span className="text-ink-muted">From the customer&rsquo;s M-Pesa to yours, checked at every hop.</span>
         </h2>
 
