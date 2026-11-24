@@ -11,7 +11,7 @@ import { clock, HOLD_LEFT_S, HOLD_TOTAL_S, isoDuration } from './sample-hold';
 gsap.registerPlugin(useGSAP, ScrollTrigger);
 
 /** Hero: the printer feeds the slip out of its mouth, then the seal is pressed onto it. */
-function heroTimeline() {
+function heroTimeline(shown: boolean) {
   const receipt = document.querySelector<HTMLElement>('[data-hero-receipt]');
   if (!receipt) return () => {};
   const stamp = receipt.querySelector('[data-stamp]');
@@ -19,7 +19,7 @@ function heroTimeline() {
   const led = document.querySelector('[data-printer-led]');
   const printer = document.querySelector('[data-printer]');
   const FEED_S = 1.6;
-  const tl = gsap.timeline({ delay: 0.2, defaults: { ease: 'power3.out' } });
+  const tl = gsap.timeline({ defaults: { ease: 'power3.out' } });
   tl.addLabel('feed', 0)
     // Thermal printers feed at a constant rate: linear, from fully inside the mouth to fully out.
     .fromTo(receipt, { yPercent: -100 }, { yPercent: 0, duration: FEED_S, ease: 'none' }, 'feed');
@@ -44,12 +44,27 @@ function heroTimeline() {
   document.querySelectorAll<HTMLElement>('[data-hero-chip]').forEach((chip, i) => {
     tl.fromTo(chip, { autoAlpha: 0, x: i === 0 ? -18 : 18 }, { autoAlpha: 1, x: 0, duration: 0.55 }, `stamp+=${0.5 + i * 0.12}`);
   });
-  return () => {};
+  // Prints once the printer sits in the upper part of the screen, so the feed is seen from the start.
+  replayInView(tl, printer, 'top 60%', 'top 8%', shown);
+  return () => tl.progress(1);
 }
 
 /** Run `play` once, the first time `el` scrolls into view. Every run is finite (<= 5 s, WCAG 2.2.2). */
 function onFirstView(el: Element | null, play: () => void, start = 'top 85%') {
   if (el) ScrollTrigger.create({ trigger: el, start, once: true, onEnter: play });
+}
+
+/**
+ * Plays `tl` each time `el` comes well into view, from below (`start`) or from above (`end`), and
+ * rewinds it only once `el` is fully off screen, so a replay never visibly jumps back to its start.
+ * Each run stays finite (WCAG 2.2.2). `shown`: start in the finished state (content already visible).
+ */
+function replayInView(tl: gsap.core.Timeline, el: Element | null, start = 'bottom 92%', end = 'top 8%', shown = false) {
+  if (!el) return;
+  if (shown) tl.progress(1).pause();
+  else tl.pause(0);
+  ScrollTrigger.create({ trigger: el, start, end, onEnter: () => tl.restart(), onEnterBack: () => tl.restart() });
+  ScrollTrigger.create({ trigger: el, start: 'top bottom', end: 'bottom top', onLeave: () => tl.pause(0), onLeaveBack: () => tl.pause(0) });
 }
 
 /** "How a shilling travels": one pass (~4 s) of a pulse along each beam, lighting the next chip; ends with every chip lit. */
@@ -73,14 +88,15 @@ function beamFlow(wide: boolean) {
       .set(p, { autoAlpha: 0 })
       .call(() => light(chips[i + 1]!, true, true));
   });
-  onFirstView(flow, () => tl.play());
+  replayInView(tl, flow, 'top 70%', 'top 10%');
   return () => chips.forEach((c) => light(c, true));
 }
 
 /** Bento: each tile rises in once, then plays its mini-UI; the hold countdown ticks its last 5 s once, ending on the served value. */
 function bento() {
   document.querySelectorAll<HTMLElement>('[data-tile]').forEach((tile) => {
-    const tl = gsap.timeline({ scrollTrigger: { trigger: tile, start: 'top 88%', once: true }, defaults: { ease: 'power3.out' } });
+    const tl = gsap.timeline({ defaults: { ease: 'power3.out' } });
+    replayInView(tl, tile, 'top 85%', 'top 10%');
     tl.fromTo(tile, { autoAlpha: 0, y: 24 }, { autoAlpha: 1, y: 0, duration: 0.6 });
     const rows = tile.querySelectorAll('[data-ledger-row]');
     if (rows.length) tl.fromTo(rows, { autoAlpha: 0, x: -8 }, { autoAlpha: 1, x: 0, stagger: 0.12, duration: 0.4 }, '-=0.2');
@@ -95,17 +111,21 @@ function bento() {
       });
     const bars = tile.querySelectorAll('[data-bar]');
     if (bars.length) tl.fromTo(bars, { scaleX: 0 }, { scaleX: 1, stagger: 0.1, duration: 0.7 }, '-=0.2');
-    const sms = tile.querySelector('[data-sms]');
-    const phone = tile.querySelector('[data-phone]');
-    // The phone buzzes, then the banner drops out of the camera island like a real notification.
-    if (phone && sms) tl.fromTo(phone, { rotate: 0 }, { rotate: 1.2, duration: 0.05, repeat: 7, yoyo: true, ease: 'none' }, '+=0.5');
-    if (sms)
-      tl.fromTo(
-        sms,
-        { y: -70, scale: 0.86, autoAlpha: 0, transformOrigin: '50% 0%' },
-        { y: 0, scale: 1, autoAlpha: 1, duration: 0.7, ease: 'back.out(1.5)' },
-        phone ? '<0.1' : '+=0.5'
-      );
+    const sms = tile.querySelector<HTMLElement>('[data-sms]');
+    const phone = tile.querySelector<HTMLElement>('[data-phone]');
+    if (!sms) return;
+    // The notification has its own trigger on the phone, so it plays only once the whole phone is
+    // on screen: hidden now, then a buzz and the banner dropping out of the camera island.
+    gsap.set(sms, { autoAlpha: 0 });
+    const ping = gsap.timeline({ delay: 0.35 });
+    if (phone) ping.fromTo(phone, { rotate: 0 }, { rotate: 1.2, duration: 0.05, repeat: 7, yoyo: true, ease: 'none' });
+    ping.fromTo(
+      sms,
+      { y: -70, scale: 0.86, autoAlpha: 0, transformOrigin: '50% 0%' },
+      { y: 0, scale: 1, autoAlpha: 1, duration: 0.7, ease: 'back.out(1.5)' },
+      phone ? '<0.1' : 0
+    );
+    replayInView(ping, phone ?? sms, 'center 70%', 'center 30%');
   });
 
   const time = document.querySelector<HTMLTimeElement>('[data-countdown]');
@@ -131,6 +151,44 @@ function bento() {
   };
 }
 
+/** Section headings rise in once as they reach the lower part of the screen. */
+function headings() {
+  const els = gsap.utils.toArray<HTMLElement>('main h2');
+  gsap.set(els, { autoAlpha: 0, y: 24 });
+  ScrollTrigger.batch(els, {
+    start: 'top 88%',
+    once: true,
+    onEnter: (batch) => gsap.to(batch, { autoAlpha: 1, y: 0, duration: 0.8, ease: 'power3.out', stagger: 0.1 }),
+  });
+}
+
+/**
+ * Desktop only: the element leans toward the pointer in 3D while it is over `area`, and levels out
+ * when it leaves. quickTo reuses one tween per axis, so pointermove never piles up tweens.
+ */
+function tilt(target: HTMLElement | null, area: HTMLElement | null, maxDeg: number) {
+  if (!target || !area) return () => {};
+  gsap.set(target, { transformPerspective: 900, transformOrigin: '50% 50%' });
+  const rx = gsap.quickTo(target, 'rotationX', { duration: 0.6, ease: 'power3' });
+  const ry = gsap.quickTo(target, 'rotationY', { duration: 0.6, ease: 'power3' });
+  const move = (e: PointerEvent) => {
+    const r = area.getBoundingClientRect();
+    ry(((e.clientX - r.left) / r.width - 0.5) * 2 * maxDeg);
+    rx(-((e.clientY - r.top) / r.height - 0.5) * 2 * maxDeg);
+  };
+  const leave = () => {
+    rx(0);
+    ry(0);
+  };
+  area.addEventListener('pointermove', move);
+  area.addEventListener('pointerleave', leave);
+  return () => {
+    area.removeEventListener('pointermove', move);
+    area.removeEventListener('pointerleave', leave);
+    gsap.set(target, { rotationX: 0, rotationY: 0 });
+  };
+}
+
 /**
  * Landing-only motion (GSAP + Lenis). Everything is server-rendered in its final state; this only
  * animates toward it, and only under `prefers-reduced-motion: no-preference`.
@@ -148,16 +206,19 @@ export function LandingMotion() {
     const printHero = document.documentElement.classList.contains(MOTION_PENDING);
     const mm = gsap.matchMedia();
     mm.add('(prefers-reduced-motion: no-preference)', () => {
-      const lenis = new Lenis();
+      // Slightly softer than the default glide, and in-page links (#how, #security) scroll through Lenis
+      // so they ease too, stopping clear of the sticky nav.
+      const lenis = new Lenis({ lerp: 0.085, smoothWheel: true, anchors: { offset: -72 } });
       lenis.on('scroll', ScrollTrigger.update);
       const tick = (time: number) => lenis.raf(time * 1000);
       gsap.ticker.add(tick);
       gsap.ticker.lagSmoothing(0);
-      const undoHero = printHero ? heroTimeline() : () => {};
+      const undoHero = heroTimeline(!printHero);
       const stage = document.querySelector('[data-stage]');
       // The border beam turns once (CSS, 5 s) the first time the stage is on screen.
       onFirstView(stage, () => stage?.setAttribute('data-inview', ''), 'top bottom');
       const undoBento = bento();
+      headings();
       return () => {
         gsap.ticker.remove(tick);
         gsap.ticker.lagSmoothing(500, 33);
@@ -165,6 +226,14 @@ export function LandingMotion() {
         undoHero();
         undoBento();
         stage?.removeAttribute('data-inview');
+      };
+    });
+    mm.add('(prefers-reduced-motion: no-preference) and (hover: hover) and (pointer: fine)', () => {
+      const undoHeroTilt = tilt(document.querySelector('[data-tilt="hero"]'), document.querySelector('[data-stage]'), 5);
+      const undoPhoneTilt = tilt(document.querySelector('[data-tilt="phone"]'), document.querySelector('[data-tilt="phone"]')?.closest('[data-tile]') ?? null, 8);
+      return () => {
+        undoHeroTilt();
+        undoPhoneTilt();
       };
     });
     // The beams run down on phones and across on desktop, so they rebuild when that changes.

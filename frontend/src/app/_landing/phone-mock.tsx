@@ -31,7 +31,7 @@ function StatusIcons() {
 
 export function PhoneMock() {
   return (
-    <div role="group" aria-label="Sample: the agent app as an M-Pesa payout SMS arrives" className="relative mx-auto w-full max-w-[16rem]">
+    <div role="group" aria-label="Sample: the agent app as an M-Pesa payout SMS arrives" data-tilt="phone" className="relative mx-auto w-full max-w-[16rem]">
       {/* Side buttons: action + volume on the left, power on the right. */}
       <span aria-hidden className="absolute top-20 -left-[3px] h-6 w-[3px] rounded-l-sm bg-[#3a403d]" />
       <span aria-hidden className="absolute top-30 -left-[3px] h-10 w-[3px] rounded-l-sm bg-[#3a403d]" />

@@ -28,7 +28,7 @@ function ThermalPrinter() {
 export function HeroReceipt() {
   const amount = moneyParts(SAMPLE_CENTS);
   return (
-    <div className="relative w-full max-w-[26rem]">
+    <div data-tilt="hero" className="relative w-full max-w-[26rem] will-change-transform">
       <ThermalPrinter />
       {/* Clipped at the mouth (padding keeps the paper's side and bottom shadow visible). */}
       <div className="relative -mx-4 -mt-1 overflow-hidden px-4 pb-10 sm:-mx-6 sm:px-6">
